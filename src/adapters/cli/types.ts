@@ -112,6 +112,20 @@ export interface CliAdapter {
     remoteThreadId?: string;
   }): string[];
 
+  /** Return the CLI-native session id that buildArgs() guarantees this spawn
+   *  will use. The worker persists this value immediately before launching the
+   *  child, so startup hooks can resolve the active botmux session before the
+   *  first prompt or transcript entry exists.
+   *
+   *  Adapters must omit this capability when the CLI mints its own id. Resume
+   *  implementations must return the effective resume target, not blindly the
+   *  current botmux session id. Later observed rotations still supersede it. */
+  resolvePreSpawnCliSessionId?(opts: {
+    sessionId: string;
+    resume: boolean;
+    resumeSessionId?: string;
+  }): string | undefined;
+
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).
    *  The worker skips queuing the prompt for stdin write unless another
    *  defer condition routes it through the post-start input queue. */

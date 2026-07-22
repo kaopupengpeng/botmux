@@ -656,6 +656,14 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
       return args;
     },
 
+    // Claude-family argv fixes the native id before the process starts:
+    // fresh uses --session-id, resume uses the exact --resume target. Publish
+    // that identity before SessionStart can fire; writeInput may still replace
+    // it later when /clear or another in-process rotation is observed.
+    resolvePreSpawnCliSessionId({ sessionId, resume, resumeSessionId }) {
+      return resume ? (resumeSessionId ?? sessionId) : sessionId;
+    },
+
     injectsSessionContext: true,
 
     async writeInput(pty, content) {

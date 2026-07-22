@@ -6401,6 +6401,13 @@ async function spawnCli(
     remoteWsUrl,
     remoteThreadId,
   });
+  const preSpawnCliSessionId = willReattachPersistent
+    ? undefined
+    : cliAdapter.resolvePreSpawnCliSessionId?.({
+        sessionId: effectiveAdapterSessionId,
+        resume: effectiveResume,
+        resumeSessionId: effectiveCliSessionId,
+      });
 
   // Extra args from env (CLI_DISABLE_DEFAULT_ARGS is removed — adapters own their defaults)
   const extra = (process.env.CLI_EXTRA_ARGS ?? '').trim();
@@ -7072,6 +7079,13 @@ async function spawnCli(
       `[device-credential-isolation] wrapping ${cliAdapter.id} in credential-only bwrap `
       + `(${hideDirectories.size} authority dir(s), ${hideFiles.size} exact file(s))`,
     );
+  }
+
+  if (preSpawnCliSessionId) {
+    // Persist synchronously before the child can emit startup hooks. Claude's
+    // SessionStart fires before the first transcript-backed writeInput result,
+    // and external consumers resolve that callback through cliSessionId.
+    persistCliSessionId(preSpawnCliSessionId);
   }
 
   backend.spawn(spawnBin, spawnArgs, {
