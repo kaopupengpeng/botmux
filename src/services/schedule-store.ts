@@ -20,7 +20,16 @@ import { dashboardEventBus } from '../core/dashboard-events.js';
 import { computeInputHash } from '../utils/canonical-input-hash.js';
 import { withFileLockSync } from '../utils/file-lock.js';
 import { fsyncDirectorySyncPortable } from '../utils/fs-durability.js';
-import type { ScheduledTask, ParsedSchedule, ScheduleExecutionPosition } from '../types.js';
+import type {
+  ScheduledTask,
+  ParsedSchedule,
+  ScheduleExecutionPosition,
+  ManagedScheduleEnvelope,
+} from '../types.js';
+import {
+  taskMetadataDigest,
+  validateTaskMetadata,
+} from './urgent-tier-provider-contract.js';
 
 // ─── Idempotency types (events doc v0.1.2 §2.2) ─────────────────────────────
 
@@ -123,6 +132,54 @@ export function canonicalScheduleInput(t: {
   };
 }
 
+function validateManagedEnvelope(value: unknown): ManagedScheduleEnvelope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('managed schedule envelope must be an object');
+  }
+  const input = value as Record<string, unknown>;
+  const keys = Object.keys(input).sort();
+  const withoutDigest = ['manager_domain', 'metadata', 'schema'];
+  const withDigest = ['manager_domain', 'metadata', 'metadata_digest', 'schema'];
+  if (keys.join(',') !== withoutDigest.join(',') && keys.join(',') !== withDigest.join(',')) {
+    throw new Error('managed schedule envelope keys mismatch');
+  }
+  if (input.schema !== 'botmux.schedule-managed/v1'
+    || input.manager_domain !== 'ndbflow.urgent-tier.schedule/v1') {
+    throw new Error('managed schedule envelope protocol mismatch');
+  }
+  const metadata = validateTaskMetadata(input.metadata);
+  const metadataDigest = taskMetadataDigest(metadata);
+  if (input.metadata_digest !== undefined && input.metadata_digest !== metadataDigest) {
+    throw new Error('managed schedule metadata digest mismatch');
+  }
+  return {
+    schema: 'botmux.schedule-managed/v1',
+    manager_domain: 'ndbflow.urgent-tier.schedule/v1',
+    metadata,
+    metadata_digest: metadataDigest,
+  };
+}
+
+function canonicalManagedScheduleInput(
+  task: Parameters<typeof canonicalScheduleInput>[0] & { managed: ManagedScheduleEnvelope },
+): unknown {
+  return {
+    domain: 'botmux.schedule-managed-input/v1',
+    ordinary: canonicalScheduleInput(task),
+    schema: task.managed.schema,
+    manager_domain: task.managed.manager_domain,
+    metadata_digest: task.managed.metadata_digest,
+  };
+}
+
+function scheduleInputHash(
+  task: Parameters<typeof canonicalScheduleInput>[0] & { managed?: ManagedScheduleEnvelope },
+): string {
+  return computeInputHash(
+    task.managed ? canonicalManagedScheduleInput({ ...task, managed: task.managed }) : canonicalScheduleInput(task),
+  );
+}
+
 let tasks: Map<string, ScheduledTask> = new Map();
 let loaded = false;
 let cachedFileVersion = 'missing';
@@ -184,6 +241,13 @@ function migrate(raw: any): ScheduledTask | null {
         ? 'new-topic'
         : undefined;
 
+  const managed = raw.managed === undefined ? undefined : validateManagedEnvelope(raw.managed);
+  if (raw.id?.startsWith('utp_') && !managed) {
+    throw new Error(`managed schedule ${raw.id} is missing its envelope`);
+  }
+  if (managed && !raw.id?.startsWith('utp_')) {
+    throw new Error(`managed schedule ${raw.id} must use utp_ namespace`);
+  }
   return {
     id: raw.id,
     name: raw.name,
@@ -213,6 +277,7 @@ function migrate(raw: any): ScheduledTask | null {
     repeat: raw.repeat,
     deliver: raw.deliver === 'local' ? 'local' : 'origin',
     silent: raw.silent === true ? true : undefined,
+    managed,
   };
 }
 
@@ -416,13 +481,21 @@ export function createTask(params: {
   repeat?: { times: number | null; completed: number };
   deliver?: 'origin' | 'local' | 'new-topic';
   silent?: boolean;
+  managed?: Omit<ManagedScheduleEnvelope, 'metadata_digest'> & { metadata_digest?: string };
 }): ScheduledTask {
   return mutateTasks(working => {
+    const managed = params.managed === undefined ? undefined : validateManagedEnvelope(params.managed);
+    if (params.id?.startsWith('utp_') && !managed) {
+      throw new Error('utp_ task id requires managed schedule envelope');
+    }
+    if (managed && !params.id?.startsWith('utp_')) {
+      throw new Error('managed schedule requires utp_ task id');
+    }
     if (params.id) {
       const existing = working.get(params.id);
       if (existing) {
-        const existingHash = computeInputHash(canonicalScheduleInput(existing));
-        const incomingHash = computeInputHash(canonicalScheduleInput(params));
+        const existingHash = scheduleInputHash(existing);
+        const incomingHash = scheduleInputHash({ ...params, managed });
         if (existingHash === incomingHash) {
           // create-or-return-identical: same id + same canonical input → no-op.
           // Do NOT mutate `enabled`, `nextRunAt`, `lastRunAt` etc — those are
@@ -469,6 +542,7 @@ export function createTask(params: {
       // explicit executionPosition field before reaching the store.
       deliver: params.deliver === 'local' ? 'local' : 'origin',
       silent: params.silent === true ? true : undefined,
+      managed,
     };
     working.set(task.id, task);
     return { result: task, changed: true };

@@ -439,6 +439,13 @@ export interface ParsedSchedule {
 
 export type ScheduleExecutionPosition = 'top-level' | 'topic' | 'new-topic';
 
+export interface ManagedScheduleEnvelope {
+  schema: 'botmux.schedule-managed/v1';
+  manager_domain: 'ndbflow.urgent-tier.schedule/v1';
+  metadata: import('./services/urgent-tier-provider-contract.js').UrgentTaskMetadata;
+  metadata_digest: string;
+}
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -496,6 +503,9 @@ export interface ScheduledTask {
    *  and fresh-topic schedules; a silent fresh topic is created lazily by the
    *  first successful `botmux send`. */
   silent?: boolean;
+  /** Optional manager-owned input. Ordinary schedules omit this field and keep
+   * their legacy canonical input and idempotency semantics unchanged. */
+  managed?: ManagedScheduleEnvelope;
   // DEPRECATED — kept only for backward-compat migration
   type?: 'cron' | 'interval' | 'once';
 }
