@@ -66,11 +66,15 @@ Commit message: `feat(urgent-provider): 定义任务元数据与摘要契约`
 **Files:**
 - Modify: `src/im/lark/client.ts`
 - Create: `src/services/urgent-tier-session-auth.ts`
+- Create: `src/services/urgent-tier-authorization-store.ts`
 - Test: `test/urgent-tier-session-auth.test.ts`
+- Test: `test/urgent-tier-authorization-store.test.ts`
 
 **Interfaces:**
 - Produces: `authenticateUrgentSession(input, deps)` and
   `authenticateUrgentNodeRead(input, deps)`.
+- Produces: `issueUrgentAuthorization`, `consumeUrgentAuthorization`,
+  `revokeUrgentAuthorization`, and session/capability invalidation hooks.
 
 - [ ] **Step 1: Write failing ordinary-session tests**
 
@@ -80,22 +84,35 @@ node-wide HMAC without session capability, bot membership, target membership,
 tenant-key absence, operation/capability mismatch, proof expiry, and generic
 failure/oracle resistance.
 
+Add authority tests for caller field modification plus recomputed digest,
+unknown ID, cross-route/target/project use, expiry, second use, explicit
+revocation, capability rotation, session close, daemon restart, node/group
+substitution, ledger capacity without unexpired eviction, unsafe host-secret
+owner/mode/symlink, data-directory ownership, and probe-only no-issuance.
+
 - [ ] **Step 2: Run the focused test and verify RED**
 
 Run:
 
 ```bash
-pnpm vitest run --project unit test/urgent-tier-session-auth.test.ts
+pnpm vitest run --project unit \
+  test/urgent-tier-session-auth.test.ts \
+  test/urgent-tier-authorization-store.test.ts
 ```
 
-Expected: FAIL because ordinary session auth does not exist.
+Expected: FAIL because ordinary session auth and its opaque ledger do not
+exist.
 
 - [ ] **Step 3: Implement exact scope proofs**
 
 Use daemon live-session state, managed-origin capability, runtime role,
 registered-client membership probes, and `/bot/v3/info` tenant key. Return
-exact `session-proof/v1`. Implement separate host-only node-read proof; never
-allow proof substitution.
+exact informational `session-proof/v1` plus a CSPRNG opaque ID. Implement the
+bounded in-memory single-use ledger, 30-second TTL, daemon-boot and capability
+generation binding, invalidation hooks, atomic consume, separate host-only
+node-read proof using verified daemon UID/data-dir/0600 host-secret ownership,
+and probe-only mode. Never allow proof substitution. Do not use Lark
+`allowedUsers` as node authority.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
@@ -293,11 +310,12 @@ Commit message: `feat(urgent-provider): 冻结调度任务与延迟回调身份`
 - Test: `test/urgent-tier-provider-ipc.test.ts`
 
 **Interfaces:**
-- Produces: all ten `botmux urgent-provider` commands and authenticated daemon routes.
+- Produces: all twelve `botmux urgent-provider` commands and authenticated daemon routes.
 
 - [ ] **Step 1: Write failing route and schema tests**
 
 Cover capabilities, ordinary session authentication, node-read authentication,
+authorization consume/revoke,
 callback authentication, history scan, conditional writes, schedule
 operations, unknown fields, oversize bodies, malformed JSON, and credential
 redaction.
@@ -399,7 +417,8 @@ pnpm daemon:restart
 
 Run `botmux urgent-provider capabilities`, ordinary `session-authenticate`,
 bot membership, and target membership readiness from the verified
-`pm-project` session. Do not send anchors or urgent actions.
+`pm-project` session with `probe_only=true`. Confirm no `proof_id` or reusable
+authorization is returned. Do not send anchors or urgent actions.
 
 - [ ] **Step 9: Commit documentation**
 

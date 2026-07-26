@@ -60,6 +60,8 @@ The CLI reads one JSON object from stdin and writes one JSON object to stdout:
 botmux urgent-provider capabilities
 botmux urgent-provider session-authenticate
 botmux urgent-provider node-read-authenticate
+botmux urgent-provider authorization-consume
+botmux urgent-provider authorization-revoke
 botmux urgent-provider callback-authenticate
 botmux urgent-provider history-scan
 botmux urgent-provider send-anchor
@@ -185,7 +187,8 @@ Response:
     "issued_at_ms": 1234567890,
     "expires_at_ms": 1234569999
   },
-  "proof_digest": "64 lowercase hexadecimal characters"
+  "proof_digest": "64 lowercase hexadecimal characters",
+  "proof_id": "utpa_<43 base64url characters>"
 }
 ```
 
@@ -194,9 +197,72 @@ rules under domain `botmux.urgent-tier.session-proof/v1`. Target membership is
 `verified` when a target is supplied and `not_requested` otherwise. The proof
 is short-lived and bound to operation/capability/project/session/app/chat/root.
 
-Every mutation route either consumes a valid matching unexpired proof or
-atomically reruns the same daemon-owned checks. A proof for one operation,
-capability, target, project, or route cannot authorize another.
+The unkeyed `proof_digest` is informational identity only. It is not
+authorization.
+
+### Opaque Authorization Ledger
+
+The authority is an opaque daemon-held ledger record selected by `proof_id`.
+
+Issuance:
+
+- generate 32 random bytes with the operating-system CSPRNG;
+- encode as unpadded base64url with prefix `utpa_`;
+- store the complete canonical proof, proof digest, proof type, current daemon
+  boot ID, current session capability generation/digest, `max_uses=1`,
+  `use_count=0`, issue time, and expiry;
+- return the informational proof/digest and opaque ID;
+- never derive the ID from proof fields.
+
+The ledger is daemon memory, not a caller-readable file. It is bounded to 1024
+live records with a hard 30-second TTL. Issuance first removes expired/consumed
+records. If 1024 unexpired unused records remain, issuance fails closed; it
+never evicts an unexpired authorization.
+
+Verification and consumption are one lock-protected operation:
+
+1. parse the opaque ID grammar;
+2. locate the exact ledger record;
+3. compare every caller-visible proof field and digest with the record;
+4. compare expected proof type, operation, capability, project, target, and
+   app/chat/root/session route;
+5. require current daemon boot ID equality;
+6. require the live session still exists and is active;
+7. require current managed-origin capability generation/digest equality;
+8. require current runtime role, bot membership, and target membership to
+   remain valid;
+9. require `now < expires_at_ms`;
+10. require `use_count=0`;
+11. increment `use_count` and remove the record before returning success.
+
+`authorization-consume` performs this operation for local NDBFlow actions that
+need authenticated claims before reading local project state. It returns the
+canonical proof only after the record is burned.
+
+Provider read/write routes perform the same consumption inside the route's
+critical section immediately before their protected read or mutation. A proof
+for one operation, capability, target, project, proof type, or route cannot
+authorize another.
+
+All group and node proofs are single-use. A caller needs a fresh proof for each
+local action or provider route. There is no reusable read bearer.
+
+Revocation:
+
+- managed-origin capability rotation invalidates every record bound to the old
+  generation/digest;
+- session close/suspend/delete invalidates every group record for that session;
+- runtime-role loss invalidates on next verification and may be eagerly swept;
+- target/bot membership loss invalidates on next verification;
+- daemon restart changes boot ID and drops the in-memory ledger, invalidating
+  every prior ID;
+- expiry and successful use remove the record;
+- explicit `urgent-provider authorization-revoke` may remove an exact ID for
+  cleanup, but revocation returns no proof details.
+
+Forgery with a recomputed unkeyed digest, unknown IDs, expiry, replay,
+cross-route use, cross-target use, rotation, closure, restart, and revocation
+all return the same generic authorization failure.
 
 All ordinary-session failures return generic
 `SESSION_AUTHORIZATION_UNPROVEN`; they do not reveal whether a session, project,
@@ -209,10 +275,35 @@ separate host-only `node-read` operation:
 botmux urgent-provider node-read-authenticate
 ```
 
-`node-read-authenticate` requires host IPC authentication plus the botmux
-owner/admin policy, returns only a short-lived
+`node-read-authenticate` requires host IPC authentication by the local node
+administrator, returns only a short-lived
 `botmux.urgent-tier.node-read-proof/v1`, and grants no group mutation.
-Managed-origin group proofs never authorize node-wide status.
+It uses the same opaque ledger, boot binding, 30-second TTL, and single-use
+semantics, but binds `proof_type=node_read` and no session capability.
+The node administrator source of truth is the operating-system account that
+owns the running daemon, its data directory, and the host IPC HMAC secret. At
+issuance and consume, botmux requires the secret to be a non-symlink regular
+file owned by the daemon UID with mode `0600`, and the data directory to be
+owned by the same UID and not group/world writable. Lark `allowedUsers` is not
+node-read authority. Managed-origin group proofs never authorize node-wide
+status, and node-read proofs never authorize group operations.
+All node-proof issuance/consume/revoke failures return generic
+`NODE_READ_AUTHORIZATION_UNPROVEN` without disclosing owner/admin or proof
+existence.
+
+### Probe-only Readiness
+
+`session-authenticate` and `node-read-authenticate` accept
+`probe_only=true`. Probe-only performs every current identity, role, tenant,
+membership, and owner/admin check but:
+
+- does not create a ledger record;
+- does not return `proof_id`;
+- returns `authorization_issued=false`;
+- cannot be passed to `authorization-consume` or any provider route.
+
+The post-publication readiness probe must use probe-only mode. Capability and
+readiness responses never leak a reusable mutation bearer.
 
 ## Capabilities
 
@@ -227,6 +318,10 @@ Managed-origin group proofs never authorize node-wide status.
   "identity_binding": "managed-origin-session",
   "ordinary_session_auth": "botmux.urgent-tier.session-proof/v1",
   "node_read_auth": "botmux.urgent-tier.node-read-proof/v1",
+  "authorization_authority": "opaque-daemon-ledger-single-use/v1",
+  "authorization_ttl_ms": 30000,
+  "authorization_max_uses": 1,
+  "probe_issues_authorization": false,
   "bot_membership_probe": true,
   "target_membership_probe": true,
   "tenant_provenance": "lark-bot-info-tenant-key",
@@ -536,6 +631,16 @@ The independent implementation must prove:
 - one session can use only its bound app;
 - ordinary `session-authenticate` proves connector/tenant/session/scope/role and
   bot/target membership without mutation;
+- opaque proof IDs are CSPRNG-generated, daemon-held, bounded, 30-second, and
+  single-use;
+- recomputed unkeyed digests cannot forge authority;
+- unknown/expired/replayed/revoked/cross-route/cross-target proofs fail
+  generically;
+- ledger capacity never evicts an unexpired unused proof;
+- capability rotation, session close, and daemon restart invalidate proofs;
+- node-read authority is the verified daemon OS owner and owner-only host IPC
+  secret, not Lark `allowedUsers`;
+- probe-only mode performs readiness checks without issuing a bearer;
 - receiver/adopt/unmanaged/stale/wrong-role sessions fail generically;
 - group proofs cannot authorize node-read and node-read proofs cannot authorize
   group mutation;
@@ -566,7 +671,7 @@ After independent review, implementation, tests, and review, publish the exact
 reviewed botmux commit to the local live daemon. Then run only the non-mutating
 capability probe plus `session-authenticate` readiness for connector/tenant,
 runtime role, bot membership, and target membership. The probe must not send a
-message or urgent action.
+message or urgent action and must use `probe_only=true`, returning no proof ID.
 
 NDBFlow implementation remains blocked until that probe returns the exact
 `botmux.urgent-tier-provider/v1` contract.
