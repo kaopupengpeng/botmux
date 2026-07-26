@@ -488,6 +488,48 @@ export async function listChatMemberOpenIds(larkAppId: string, chatId: string): 
   return openIds;
 }
 
+export async function urgentProviderBotInfo(
+  larkAppId: string,
+): Promise<{ tenantKey: string; openId: string }> {
+  const c = getBotClient(larkAppId);
+  const res = await c.request({ method: 'GET', url: '/open-apis/bot/v3/info/' });
+  const tenantKey = res.data?.bot?.tenant_key ?? res.data?.tenant_key;
+  const openId = res.data?.bot?.open_id;
+  if (res.code !== 0 || typeof tenantKey !== 'string' || !tenantKey
+    || typeof openId !== 'string' || !openId) {
+    throw new Error('urgent provider bot info unavailable');
+  }
+  return { tenantKey, openId };
+}
+
+export async function urgentProviderBotInChat(larkAppId: string, chatId: string): Promise<boolean> {
+  const c = getBotClient(larkAppId);
+  const res = await larkGet(c, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members/is_in_chat`);
+  return res.code === 0 && res.data?.is_in_chat === true;
+}
+
+export async function sendNativeUrgent(
+  larkAppId: string,
+  tier: 'app' | 'sms' | 'phone',
+  messageId: string,
+  targetOpenId: string,
+): Promise<{ requestId: string; invalidTargets: string[] }> {
+  const c = getBotClient(larkAppId);
+  const method = tier === 'app' ? c.im.v1.message.urgentApp
+    : tier === 'sms' ? c.im.v1.message.urgentSms
+      : c.im.v1.message.urgentPhone;
+  const res = await method({
+    path: { message_id: messageId },
+    params: { user_id_type: 'open_id' },
+    data: { user_id_list: [targetOpenId] },
+  });
+  if (res.code !== 0) throw new Error(`urgent ${tier} failed`);
+  return {
+    requestId: `${tier}:${messageId}`,
+    invalidTargets: res.data?.invalid_user_id_list ?? [],
+  };
+}
+
 /**
  * Resolve a chat's display name (the user-facing group title). Returns `null`
  * on any failure (chatId is unknown to this bot, network error, bot not in

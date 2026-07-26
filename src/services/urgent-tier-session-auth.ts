@@ -34,6 +34,7 @@ interface SessionIdentity {
   receiver: boolean;
   adopt: boolean;
   capabilityDigest: string;
+  originCapability?: string;
 }
 
 interface AuthDeps {

@@ -92,6 +92,8 @@ import { validateTriggerRequest, type TriggerResponse } from '../services/trigge
 import { resolveCliSelection, selectionKeyForBot } from '../setup/cli-selection.js';
 import { checkCliAvailability } from '../setup/cli-availability.js';
 import { enrichHistorySenders, type HistoryBotInfo } from '../dashboard/history-senders.js';
+import { routeUrgentProvider } from '../services/urgent-tier-provider-router.js';
+import { urgentProviderRuntimeDeps } from '../services/urgent-tier-provider-runtime.js';
 
 // 机器人真·改名 renamer，由 daemon 启动时注册（开放平台自动化 + daemon 侧
 // botName/descriptor/bots-info 同步都在 daemon 的闭包里做）。未注册（测试环境）
@@ -250,6 +252,7 @@ function routeHasNarrowUntrustedAuth(method: string, pathname: string): boolean 
   if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd)$/.test(pathname)) return true;
   if (method === 'POST' && pathname === '/api/hooks/emit') return true;
   if (method === 'POST' && pathname === '/api/attention') return true;
+  if (method === 'POST' && pathname.startsWith('/api/urgent-provider/')) return true;
   // Workflow v3 mutations carry their own domain-separated full-envelope
   // protocol (request signature over method/path/exact body with nonce
   // anti-replay + boot audience, signed response), keyed on the same host
@@ -291,6 +294,30 @@ function trustedHostAuthorized(
 
 ipcRoute('GET', '/__health', (_req, res) => {
   jsonRes(res, 200, { ok: true });
+});
+
+ipcRoute('POST', '/api/urgent-provider/:command', async (req, res, params) => {
+  try {
+    const body = await readJsonBody<Record<string, any>>(req);
+    const originCapability = typeof body.originCapability === 'string'
+      ? body.originCapability
+      : undefined;
+    delete body.originCapability;
+    const result = await routeUrgentProvider(
+      params.command,
+      body,
+      urgentProviderRuntimeDeps({
+        originCapability,
+        trustedHost: isTrustedHostIpcRequest(req),
+      }),
+    );
+    jsonRes(res, 200, result);
+  } catch (error) {
+    jsonRes(res, 403, {
+      ok: false,
+      error: error instanceof Error ? error.message : 'URGENT_PROVIDER_FAILED',
+    });
+  }
 });
 
 // ─── Session list / detail ─────────────────────────────────────────────────

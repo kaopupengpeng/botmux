@@ -9151,6 +9151,11 @@ switch (command) {
     await cmdVcAgent(process.argv[3] ?? '', process.argv.slice(4));
     break;
   }
+  case 'urgent-provider': {
+    const { cmdUrgentProvider } = await import('./cli/urgent-provider.js');
+    await cmdUrgentProvider(process.argv[3] ?? '');
+    break;
+  }
   case 'plugin':
   case 'plugins':  await cmdPlugin(process.argv.slice(3)); break;
   case 'whiteboard':

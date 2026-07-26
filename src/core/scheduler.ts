@@ -4,7 +4,9 @@ import { scheduleTimeZone, zonedTomorrowAt } from '../utils/timezone.js';
 import { emitHookEvent } from '../services/hook-runner.js';
 import { logger } from '../utils/logger.js';
 import { dashboardEventBus } from './dashboard-events.js';
-import type { ScheduledTask, ParsedSchedule, ScheduleExecutionPosition } from '../types.js';
+import type {
+  ScheduledTask, ParsedSchedule, ScheduleExecutionPosition, ManagedScheduleEnvelope,
+} from '../types.js';
 
 // Callback set by daemon to execute a scheduled task
 let executeCallback: ((task: ScheduledTask) => Promise<void>) | null = null;
@@ -561,6 +563,7 @@ export function stopScheduler(): void {
 }
 
 export function addTask(params: {
+  id?: string;
   name: string;
   schedule: string;
   prompt: string;
@@ -579,6 +582,7 @@ export function addTask(params: {
   repeat?: { times: number | null; completed: number };
   deliver?: 'origin' | 'local' | 'new-topic';
   silent?: boolean;
+  managed?: Omit<ManagedScheduleEnvelope, 'metadata_digest'> & { metadata_digest?: string };
 }): ScheduledTask {
   const parsed = params.parsed ?? parseSchedule(params.schedule);
   const nextRunAt = computeNextRun(parsed) ?? undefined;
@@ -594,6 +598,7 @@ export function addTask(params: {
   const topicTitle = normalizeTopicTitle(params.topicTitle);
   const scope: 'thread' | 'chat' = executionPosition === 'topic' ? 'thread' : 'chat';
   const task = scheduleStore.createTask({
+    id: params.id,
     name: params.name,
     schedule: params.schedule,
     parsed,
@@ -615,6 +620,7 @@ export function addTask(params: {
     // local-vs-chat distinction; schedule-store also normalizes legacy values.
     deliver: params.deliver === 'local' ? 'local' : 'origin',
     silent: params.silent,
+    managed: params.managed,
   });
   logger.info(`[scheduler] Added task "${task.name}" (${task.id}) — ${parsed.display}, next: ${nextRunAt ?? 'N/A'}`);
   return task;
