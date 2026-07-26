@@ -92,7 +92,10 @@ import { validateTriggerRequest, type TriggerResponse } from '../services/trigge
 import { resolveCliSelection, selectionKeyForBot } from '../setup/cli-selection.js';
 import { checkCliAvailability } from '../setup/cli-availability.js';
 import { enrichHistorySenders, type HistoryBotInfo } from '../dashboard/history-senders.js';
-import { routeUrgentProvider } from '../services/urgent-tier-provider-router.js';
+import {
+  parseUrgentProviderRequest,
+  routeUrgentProvider,
+} from '../services/urgent-tier-provider-router.js';
 import { urgentProviderRuntimeDeps } from '../services/urgent-tier-provider-runtime.js';
 
 // 机器人真·改名 renamer，由 daemon 启动时注册（开放平台自动化 + daemon 侧
@@ -194,6 +197,18 @@ export async function readJsonBody<T = unknown>(req: IncomingMessage): Promise<T
   for await (const c of req) chunks.push(c as Buffer);
   if (chunks.length === 0) return {} as T;
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+async function readRawBody(req: IncomingMessage, maxBytes = 256 * 1024): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) throw new Error('URGENT_PROVIDER_INPUT_INVALID');
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 // ─── Trusted-host auth (loopback + route-bound HMAC) ────────────────────────
@@ -298,14 +313,13 @@ ipcRoute('GET', '/__health', (_req, res) => {
 
 ipcRoute('POST', '/api/urgent-provider/:command', async (req, res, params) => {
   try {
-    const body = await readJsonBody<Record<string, any>>(req);
-    const originCapability = typeof body.originCapability === 'string'
-      ? body.originCapability
-      : undefined;
-    delete body.originCapability;
+    const { payload, originCapability } = parseUrgentProviderRequest(
+      params.command,
+      await readRawBody(req),
+    );
     const result = await routeUrgentProvider(
       params.command,
-      body,
+      payload,
       urgentProviderRuntimeDeps({
         originCapability,
         trustedHost: isTrustedHostIpcRequest(req),

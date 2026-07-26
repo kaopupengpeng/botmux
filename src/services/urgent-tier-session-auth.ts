@@ -69,8 +69,25 @@ export interface SessionProof {
   expires_at_ms: number;
 }
 
-function digest(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  const input = value as Record<string, unknown>;
+  return `{${Object.keys(input).sort().map(key =>
+    `${JSON.stringify(key)}:${canonical(input[key])}`).join(',')}}`;
+}
+
+function frame(value: Buffer): Buffer {
+  const size = Buffer.allocUnsafe(4);
+  size.writeUInt32BE(value.length);
+  return Buffer.concat([size, value]);
+}
+
+function digest(domain: string, value: unknown): string {
+  return createHash('sha256').update(Buffer.concat([
+    frame(Buffer.from(domain, 'utf8')),
+    frame(Buffer.from(canonical(value), 'utf8')),
+  ])).digest('hex');
 }
 
 function genericSessionFailure(): Error {
@@ -135,7 +152,7 @@ export async function authenticateUrgentSession(
       issued_at_ms: issuedAt,
       expires_at_ms: issuedAt + 30_000,
     };
-    const proofDigest = digest(proof);
+    const proofDigest = digest('botmux.urgent-tier.session-proof/v1', proof);
     if (input.probeOnly) {
       return { proof, proofDigest, authorizationIssued: false };
     }
@@ -189,7 +206,7 @@ export async function authenticateUrgentNodeRead(
       issued_at_ms: issuedAt,
       expires_at_ms: issuedAt + 30_000,
     };
-    const proofDigest = digest(proof);
+    const proofDigest = digest('botmux.urgent-tier.node-read-proof/v1', proof);
     if (input.probeOnly) {
       return { proof, proofDigest, authorizationIssued: false };
     }

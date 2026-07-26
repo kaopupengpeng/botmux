@@ -26,9 +26,11 @@ export async function cmdUrgentProvider(command: string): Promise<void> {
     process.env.SESSION_DATA_DIR ?? config.session.dataDir,
     sessionId,
   )?.capability;
+  const includeSessionId = command === 'session-authenticate'
+    || command === 'callback-authenticate';
   const body = JSON.stringify({
     ...payload,
-    ...(sessionId ? { sessionId } : {}),
+    ...(includeSessionId && sessionId ? { sessionId } : {}),
     ...(capability ? { originCapability: capability } : {}),
   });
   const path = `/api/urgent-provider/${encodeURIComponent(command)}`;

@@ -524,8 +524,17 @@ export async function sendNativeUrgent(
     data: { user_id_list: [targetOpenId] },
   });
   if (res.code !== 0) throw new Error(`urgent ${tier} failed`);
+  const responseIdentity = {
+    code: res.code,
+    invalid_user_id_list: [...(res.data?.invalid_user_id_list ?? [])].sort(),
+    message_id: messageId,
+    target_open_id: targetOpenId,
+    tier,
+  };
   return {
-    requestId: `${tier}:${messageId}`,
+    requestId: createHash('sha256')
+      .update(JSON.stringify(responseIdentity))
+      .digest('hex'),
     invalidTargets: res.data?.invalid_user_id_list ?? [],
   };
 }
@@ -1641,3 +1650,4 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
 
   return configured;
 }
+import { createHash } from 'node:crypto';

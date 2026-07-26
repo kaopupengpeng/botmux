@@ -8,6 +8,7 @@ import {
 const scope = {
   appId: 'cli-1', chatId: 'oc-1', rootMessageId: '',
   anchor: { create_time_ms: 100, message_id: 'om_anchor' },
+  sessionId: 'session-1', capabilityDigest: 'a'.repeat(64),
 };
 
 function proof(store: UrgentHistoryProofStore) {
@@ -16,6 +17,9 @@ function proof(store: UrgentHistoryProofStore) {
     observedHead: scope.anchor,
     messagesDigest: 'a'.repeat(64),
     complete: true,
+    requestId: 'request-1',
+    scanStartedAtMs: 900,
+    scanCompletedAtMs: 1_000,
   });
 }
 
@@ -31,7 +35,13 @@ describe('urgent conditional delivery', () => {
       actionId: 'b'.repeat(64), markdown: 'decision', targetOpenId: 'ou_target',
     }, {
       store,
-      finalRecheck: async () => ({ complete: true, observedHead: scope.anchor }),
+      finalRecheck: async () => ({
+        complete: true,
+        anchorFound: true,
+        humanReplyObserved: false,
+        observedHead: scope.anchor,
+        messagesDigest: 'a'.repeat(64),
+      }),
       sendAnchor: send,
       now: (() => { let value = 1_100; return () => value++; })(),
     });
@@ -49,7 +59,13 @@ describe('urgent conditional delivery', () => {
       actionId: 'b'.repeat(64), tier, messageId: 'om_anchor', targetOpenId: 'ou_target',
     }, {
       store,
-      finalRecheck: async () => ({ complete: true, observedHead: scope.anchor }),
+      finalRecheck: async () => ({
+        complete: true,
+        anchorFound: true,
+        humanReplyObserved: false,
+        observedHead: scope.anchor,
+        messagesDigest: 'a'.repeat(64),
+      }),
       sendUrgent: urgent,
       now: Date.now,
     });
@@ -67,11 +83,52 @@ describe('urgent conditional delivery', () => {
       store,
       finalRecheck: async () => ({
         complete: true,
+        anchorFound: true,
+        humanReplyObserved: false,
         observedHead: { create_time_ms: 101, message_id: 'om_advanced' },
+        messagesDigest: 'b'.repeat(64),
       }),
       sendAnchor: send,
       now: Date.now,
     })).rejects.toThrow('HISTORY_HEAD_ADVANCED');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'missing anchor',
+      recheck: {
+        complete: true, anchorFound: false, humanReplyObserved: false,
+        observedHead: scope.anchor, messagesDigest: 'a'.repeat(64),
+      },
+    },
+    {
+      name: 'human reply',
+      recheck: {
+        complete: true, anchorFound: true, humanReplyObserved: true,
+        observedHead: scope.anchor, messagesDigest: 'a'.repeat(64),
+      },
+    },
+    {
+      name: 'changed ordered evidence',
+      recheck: {
+        complete: true, anchorFound: true, humanReplyObserved: false,
+        observedHead: scope.anchor, messagesDigest: 'b'.repeat(64),
+      },
+    },
+  ])('denies $name even when the head cursor is unchanged', async ({ recheck }) => {
+    const store = new UrgentHistoryProofStore({ now: () => 1_000 });
+    const issued = proof(store);
+    const send = vi.fn();
+    await expect(sendConditionalAnchor({
+      ...scope, proofId: issued.proofId, proofDigest: issued.proofDigest,
+      actionId: 'b'.repeat(64), markdown: 'decision', targetOpenId: 'ou_target',
+    }, {
+      store,
+      finalRecheck: async () => recheck,
+      sendAnchor: send,
+      now: Date.now,
+    })).rejects.toThrow();
     expect(send).not.toHaveBeenCalled();
   });
 });

@@ -572,16 +572,33 @@ export function createTask(params: {
 
 export function getTask(id: string): ScheduledTask | undefined {
   load();
-  return tasks.get(id);
+  const task = tasks.get(id);
+  return task?.managed ? undefined : task;
+}
+
+export function getManagedTask(id: string): ScheduledTask | undefined {
+  load();
+  const task = tasks.get(id);
+  return task?.managed ? task : undefined;
 }
 
 export function removeTask(id: string): boolean {
   const existed = mutateTasks(working => {
+    if (working.get(id)?.managed || id.startsWith('utp_')) {
+      return { result: false, changed: false };
+    }
     const removed = working.delete(id);
     return { result: removed, changed: removed };
   });
   if (existed) logger.info(`[schedule-store] Removed task ${id}`);
   return existed;
+}
+
+export function removeManagedTask(id: string): boolean {
+  return mutateTasks(working => {
+    if (!working.get(id)?.managed) return { result: false, changed: false };
+    return { result: working.delete(id), changed: true };
+  });
 }
 
 export function updateTask(
@@ -592,7 +609,7 @@ export function updateTask(
 ): void {
   mutateTasks(working => {
     const task = working.get(id);
-    if (!task) return { result: undefined, changed: false };
+    if (!task || task.managed) return { result: undefined, changed: false };
     Object.assign(
       task,
       updates.deliver === 'new-topic' ? { ...updates, deliver: 'origin' as const } : updates,
@@ -601,14 +618,36 @@ export function updateTask(
   });
 }
 
+export function updateManagedTaskRuntime(
+  id: string,
+  updates: Partial<Pick<ScheduledTask,
+    'enabled' | 'lastRunAt' | 'nextRunAt' | 'lastStatus' | 'lastError' | 'lastDeliveryError' | 'repeat'
+  >>,
+): void {
+  mutateTasks(working => {
+    const task = working.get(id);
+    if (!task?.managed) return { result: undefined, changed: false };
+    Object.assign(task, updates);
+    return { result: undefined, changed: true };
+  });
+}
+
 /**
  * Record a run outcome and auto-manage repeat counter.  If the task has a
  * finite repeat count and we've hit it, the task is removed.
  */
-export function markRun(id: string, success: boolean, error?: string, deliveryError?: string): void {
+function markRunInternal(
+  id: string,
+  managed: boolean,
+  success: boolean,
+  error?: string,
+  deliveryError?: string,
+): void {
   const completedRepeat = mutateTasks(working => {
     const task = working.get(id);
-    if (!task) return { result: undefined, changed: false };
+    if (!task || Boolean(task.managed) !== managed) {
+      return { result: undefined, changed: false };
+    }
 
     const now = new Date().toISOString();
     task.lastRunAt = now;
@@ -638,7 +677,20 @@ export function markRun(id: string, success: boolean, error?: string, deliveryEr
   }
 }
 
+export function markRun(id: string, success: boolean, error?: string, deliveryError?: string): void {
+  markRunInternal(id, false, success, error, deliveryError);
+}
+
+export function markManagedRun(id: string, success: boolean, error?: string, deliveryError?: string): void {
+  markRunInternal(id, true, success, error, deliveryError);
+}
+
 export function listTasks(): ScheduledTask[] {
+  load();
+  return [...tasks.values()].filter(task => !task.managed);
+}
+
+export function listAllTasksForScheduler(): ScheduledTask[] {
   load();
   return [...tasks.values()];
 }

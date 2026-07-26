@@ -40,15 +40,61 @@ describe('managed urgent schedule', () => {
   });
 
   it('returns identical managed task and conflicts on metadata drift', async () => {
-    const { createTask, getTask, IdempotencyConflictError } = await import('../src/services/schedule-store.js');
+    const {
+      createTask,
+      getManagedTask,
+      getTask,
+      IdempotencyConflictError,
+      listTasks,
+    } = await import('../src/services/schedule-store.js');
     const managed = { schema: 'botmux.schedule-managed/v1' as const,
       manager_domain: 'ndbflow.urgent-tier.schedule/v1' as const, metadata };
     const first = createTask({ ...params, id: metadata.provider_task_id, managed });
     expect(createTask({ ...params, id: metadata.provider_task_id, managed })).toEqual(first);
-    expect(getTask(first.id)?.managed?.metadata).toEqual(metadata);
+    expect(getTask(first.id)).toBeUndefined();
+    expect(getManagedTask(first.id)?.managed?.metadata).toEqual(metadata);
+    expect(listTasks()).toEqual([]);
     expect(() => createTask({ ...params, id: metadata.provider_task_id,
       managed: { ...managed, metadata: { ...metadata, generation: 1 } } }))
       .toThrow(IdempotencyConflictError);
+  });
+
+  it('denies ordinary mutation while allowing narrow managed runtime updates', async () => {
+    const {
+      createTask,
+      getManagedTask,
+      listAllTasksForScheduler,
+      markManagedRun,
+      markRun,
+      removeTask,
+      updateManagedTaskRuntime,
+      updateTask,
+    } = await import('../src/services/schedule-store.js');
+    const managed = {
+      schema: 'botmux.schedule-managed/v1' as const,
+      manager_domain: 'ndbflow.urgent-tier.schedule/v1' as const,
+      metadata,
+    };
+    const task = createTask({ ...params, id: metadata.provider_task_id, managed });
+
+    expect(removeTask(task.id)).toBe(false);
+    updateTask(task.id, { enabled: false, prompt: 'attacker' });
+    markRun(task.id, false, 'attacker');
+    expect(getManagedTask(task.id)).toMatchObject({
+      enabled: true,
+      prompt: 'callback',
+      lastRunAt: undefined,
+      lastStatus: undefined,
+    });
+
+    updateManagedTaskRuntime(task.id, { nextRunAt: '2026-07-26T10:01:00.000Z' });
+    markManagedRun(task.id, true);
+    expect(getManagedTask(task.id)).toMatchObject({
+      nextRunAt: undefined,
+      lastStatus: 'ok',
+      enabled: false,
+    });
+    expect(listAllTasksForScheduler().map(candidate => candidate.id)).toEqual([task.id]);
   });
 
   it('rejects namespace crossover', async () => {

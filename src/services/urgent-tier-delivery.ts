@@ -5,7 +5,10 @@ import {
 
 interface FinalRecheck {
   complete: boolean;
+  anchorFound: boolean;
+  humanReplyObserved: boolean;
   observedHead: HistoryCursor;
+  messagesDigest: string;
 }
 
 interface MutationReceipt {
@@ -41,8 +44,13 @@ async function authorizeWrite(
   const proof = deps.store.consume(input.proofId, input.proofDigest, input);
   const final = await deps.finalRecheck();
   if (!final.complete) throw new Error('HISTORY_VISIBILITY_UNKNOWN');
+  if (!final.anchorFound) throw new Error('HISTORY_VISIBILITY_UNKNOWN');
+  if (final.humanReplyObserved) throw new Error('HUMAN_REPLY_OBSERVED');
   if (!sameCursor(final.observedHead, proof.observedHead)) {
     throw new Error('HISTORY_HEAD_ADVANCED');
+  }
+  if (final.messagesDigest !== proof.messagesDigest) {
+    throw new Error('HISTORY_VISIBILITY_UNKNOWN');
   }
   return { proof, final };
 }

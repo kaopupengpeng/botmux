@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import { dashboardSecretPath } from '../core/dashboard-secret.js';
 import { findActiveBySessionId } from '../core/worker-pool.js';
 import { resolveRole } from '../core/role-resolver.js';
 import * as scheduler from '../core/scheduler.js';
@@ -24,6 +25,7 @@ import {
 } from './urgent-tier-session-auth.js';
 import { authenticateUrgentCallback } from './urgent-tier-provider-auth.js';
 import {
+  evaluateUrgentHistory,
   scanUrgentHistory,
   UrgentHistoryProofStore,
   type HistoryMessage,
@@ -34,10 +36,22 @@ import {
 } from './urgent-tier-delivery.js';
 import type { UrgentTaskMetadata } from './urgent-tier-provider-contract.js';
 import type { UrgentProviderRouterDeps } from './urgent-tier-provider-router.js';
+import { verifyUrgentNodeAuthority } from './urgent-tier-node-authority.js';
+import { registerUrgentAuthorizationLifecycle } from './urgent-tier-lifecycle.js';
 
 const bootId = randomUUID();
 const authorizationStore = new UrgentAuthorizationStore({ bootId });
-const historyStore = new UrgentHistoryProofStore();
+const historyStore = new UrgentHistoryProofStore({ bootId });
+registerUrgentAuthorizationLifecycle({
+  revokeCapability: (sessionId, capabilityDigest) => {
+    authorizationStore.revokeCapability(sessionId, capabilityDigest);
+    historyStore.revokeCapability(sessionId, capabilityDigest);
+  },
+  revokeSession: sessionId => {
+    authorizationStore.revokeSession(sessionId);
+    historyStore.revokeSession(sessionId);
+  },
+});
 
 function inputRecord(value: unknown): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -84,16 +98,31 @@ function sessionDeps(originCapability?: string, trustedHost = false) {
     botInChat: urgentProviderBotInChat,
     targetInChat: async (appId: string, chatId: string, target: string) =>
       (await listChatMemberOpenIds(appId, chatId)).includes(target),
-    verifyNodeOwner: () => trustedHost,
+    verifyNodeOwner: () => trustedHost
+      && verifyUrgentNodeAuthority(config.session.dataDir, dashboardSecretPath()),
   };
 }
 
-function historyMessages(raw: any[]): HistoryMessage[] {
-  return raw.map(item => ({
-    create_time_ms: Number(item.create_time),
-    message_id: String(item.message_id),
-    sender_type: item.sender?.sender_type === 'user' ? 'user' : 'bot',
-  }));
+export function historyMessages(raw: any[]): HistoryMessage[] {
+  return raw.map(item => {
+    const rawType = item.sender?.sender_type;
+    const senderType = rawType === 'user'
+      ? 'user'
+      : rawType === 'bot' || rawType === 'app'
+        ? 'bot'
+        : 'unknown';
+    return {
+      create_time_ms: Number(item.create_time),
+      message_id: String(item.message_id),
+      sender_type: senderType as HistoryMessage['sender_type'],
+      sender_id: typeof item.sender?.id === 'string'
+        ? item.sender.id
+        : item.sender?.id?.open_id ?? item.sender?.id?.app_id ?? '',
+      withdrawn: item.deleted === true || item.is_withdrawn === true,
+      root_id: typeof item.root_id === 'string' ? item.root_id : '',
+      thread_id: typeof item.thread_id === 'string' ? item.thread_id : '',
+    };
+  });
 }
 
 async function consumeGroupAuthorization(
@@ -194,7 +223,10 @@ export function urgentProviderRuntimeDeps(
         rootMessageId: p.rootMessageId ?? '',
         sessionId: p.sessionId ?? '',
       }, record => {
-        if (record.proofType === 'node') return context.trustedHost === true;
+        if (record.proofType === 'node') {
+          return context.trustedHost === true
+            && verifyUrgentNodeAuthority(config.session.dataDir, dashboardSecretPath());
+        }
         const session = liveSession(record.sessionId);
         return !!session
           && session.active
@@ -206,18 +238,47 @@ export function urgentProviderRuntimeDeps(
       });
       return { ok: true, proof: authority.proof, proofDigest: authority.proofDigest };
     },
-    authorizationRevoke: raw => {
+    authorizationRevoke: async raw => {
       const p = inputRecord(raw);
-      return authorizationStore.revoke(p.proofId);
+      if (p.proofType === 'group') {
+        await consumeGroupAuthorization(
+          { authorization: p },
+          p.operation,
+          p.capability,
+          p.targetOpenId ?? '',
+        );
+      } else {
+        authorizationStore.consumeIssued(p.proofId, {
+          proofType: 'node',
+          proof: p.proof,
+          proofDigest: p.proofDigest,
+          operation: p.operation,
+          capability: p.capability,
+          projectId: p.projectId ?? '',
+          targetOpenId: p.targetOpenId ?? '',
+          appId: p.appId ?? '',
+          chatId: p.chatId ?? '',
+          rootMessageId: p.rootMessageId ?? '',
+          sessionId: p.sessionId ?? '',
+        }, record => record.proofType === 'node'
+          && context.trustedHost === true
+          && verifyUrgentNodeAuthority(config.session.dataDir, dashboardSecretPath()));
+      }
+      return { ok: true };
     },
     callbackAuthenticate: raw => {
       const p = inputRecord(raw);
+      const live = liveSession(p.sessionId);
+      const deferred = findActiveBySessionId(p.sessionId)?.session.deferredScheduleRun;
+      if (!live || !deferred) throw new Error('CALLBACK_ORIGIN_UNPROVEN');
+      const taskMetadata = scheduleStore.getManagedTask(deferred.taskId)?.managed?.metadata;
+      if (!taskMetadata) throw new Error('CALLBACK_ORIGIN_UNPROVEN');
       return authenticateUrgentCallback({
-        sessionId: p.sessionId,
-        executionId: p.executionId,
-        providerTaskId: p.providerTaskId,
-        familyId: p.familyId,
-        specDigest: p.specDigest,
+        sessionId: live.sessionId,
+        executionId: deferred.turnId,
+        providerTaskId: deferred.taskId,
+        familyId: taskMetadata.family_id,
+        specDigest: taskMetadata.spec_digest,
       }, {
         verifyManagedOrigin: sessionId => {
           const session = liveSession(sessionId);
@@ -226,7 +287,7 @@ export function urgentProviderRuntimeDeps(
         },
         resolveCallbackSession: liveSession,
         readTaskMetadata: taskId =>
-          scheduleStore.getTask(taskId)?.managed?.metadata as UrgentTaskMetadata | undefined,
+          scheduleStore.getManagedTask(taskId)?.managed?.metadata as UrgentTaskMetadata | undefined,
       });
     },
     historyScan: async raw => {
@@ -237,12 +298,15 @@ export function urgentProviderRuntimeDeps(
         chatId: authority.chatId,
         rootMessageId: authority.rootMessageId,
         anchor: p.anchor,
+        sessionId: authority.sessionId,
+        capabilityDigest: authority.capabilityDigest,
       };
       return {
         ok: true,
         ...(await scanUrgentHistory(scope, {
           listPage: () => completeHistoryPage(scope),
           store: historyStore,
+          requestId: String(p.requestId),
         })),
       };
     },
@@ -271,16 +335,31 @@ export function urgentProviderRuntimeDeps(
           store: historyStore,
           finalRecheck: async () => {
             const page = await completeHistoryPage(deliveryInput);
+            if (!page.complete) {
+              return {
+                complete: false,
+                anchorFound: false,
+                humanReplyObserved: false,
+                observedHead: deliveryInput.anchor,
+                messagesDigest: '',
+              };
+            }
             return {
-              complete: page.complete,
-              observedHead: page.items.at(-1) ?? deliveryInput.anchor,
+              complete: true,
+              ...evaluateUrgentHistory(deliveryInput, page.items),
             };
           },
           sendAnchor: async data => {
             const text = `<at user_id="${data.targetOpenId}"></at>\n${data.markdown}`;
-            const messageId = p.rootMessageId
-              ? await replyMessage(p.appId, p.rootMessageId, text, 'text', true, data.actionId)
-              : await sendMessage(p.appId, p.chatId, text, 'text', data.actionId);
+            const messageId = deliveryInput.rootMessageId
+              ? await replyMessage(
+                deliveryInput.appId, deliveryInput.rootMessageId,
+                text, 'text', true, data.actionId,
+              )
+              : await sendMessage(
+                deliveryInput.appId, deliveryInput.chatId,
+                text, 'text', data.actionId,
+              );
             return { messageId, createTimeMs: Date.now(), requestId: data.actionId };
           },
           now: Date.now,
@@ -313,9 +392,18 @@ export function urgentProviderRuntimeDeps(
           store: historyStore,
           finalRecheck: async () => {
             const page = await completeHistoryPage(deliveryInput);
+            if (!page.complete) {
+              return {
+                complete: false,
+                anchorFound: false,
+                humanReplyObserved: false,
+                observedHead: deliveryInput.anchor,
+                messagesDigest: '',
+              };
+            }
             return {
-              complete: page.complete,
-              observedHead: page.items.at(-1) ?? deliveryInput.anchor,
+              complete: true,
+              ...evaluateUrgentHistory(deliveryInput, page.items),
             };
           },
           sendUrgent: (tier, messageId, target) =>
@@ -357,18 +445,18 @@ export function urgentProviderRuntimeDeps(
     scheduleObserve: async raw => {
       const p = inputRecord(raw);
       await consumeGroupAuthorization(p, 'schedule_observe', 'group_read');
-      const task = scheduleStore.getTask(p.providerTaskId);
+      const task = scheduleStore.getManagedTask(p.providerTaskId);
       if (!task?.managed) throw new Error('MANAGED_SCHEDULE_UNAVAILABLE');
       return { ok: true, task };
     },
     scheduleRemove: async raw => {
       const p = inputRecord(raw);
       await consumeGroupAuthorization(p, 'schedule_remove', 'group_write');
-      const task = scheduleStore.getTask(p.providerTaskId);
+      const task = scheduleStore.getManagedTask(p.providerTaskId);
       if (!task?.managed || task.managed.metadata_digest !== p.metadataDigest) {
         throw new Error('MANAGED_SCHEDULE_MISMATCH');
       }
-      return { ok: scheduleStore.removeTask(p.providerTaskId) };
+      return { ok: scheduleStore.removeManagedTask(p.providerTaskId) };
     },
   };
 }

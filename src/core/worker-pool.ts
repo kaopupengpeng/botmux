@@ -13,7 +13,7 @@ import { shouldInstallGlobalSkills } from '../skills/injection-mode.js';
 import { whiteboardEnabled } from '../services/whiteboard-store.js';
 import { installHook } from '../adapters/hook-installer.js';
 import { hookCommandFor } from '../adapters/hook-command.js';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { readGlobalConfig } from '../global-config.js';
 import * as sessionStore from '../services/session-store.js';
@@ -94,8 +94,24 @@ import { isLocalCliOpenEnabled, isLocalCliOpenReady } from '../services/local-cl
 import { isSilentScheduledTurn } from './silent-schedule-turns.js';
 import { writeDeferredTopicBinding } from './deferred-topic-binding.js';
 import { deferWorkerSpawnDuringDeviceIsolation } from './device-isolation-activation.js';
+import {
+  notifyUrgentCapabilityRetired,
+  notifyUrgentSessionRetired,
+} from '../services/urgent-tier-lifecycle.js';
 
 type WindowsForkOptions = ForkOptions & { windowsHide?: boolean };
+
+function retireManagedTurnOrigin(ds: DaemonSession, retireSession = false): void {
+  const capability = ds.managedTurnOrigin?.capability;
+  if (capability) {
+    notifyUrgentCapabilityRetired(
+      ds.session.sessionId,
+      createHash('sha256').update(capability).digest('hex'),
+    );
+  }
+  if (retireSession) notifyUrgentSessionRetired(ds.session.sessionId);
+  ds.managedTurnOrigin = undefined;
+}
 
 type WorkerStartupState = {
   ready: boolean;
@@ -1299,7 +1315,7 @@ export function killWorker(ds: DaemonSession): void {
   // Retiring (or observing the absence of) that generation must revoke the
   // daemon-side copy synchronously; the worker may never get a chance to send
   // its ordered revoke IPC on close/crash paths.
-  ds.managedTurnOrigin = undefined;
+  retireManagedTurnOrigin(ds, true);
   if (!ds.worker || ds.worker.killed) {
     // No live worker to receive {type:'close'}, so its destroySession() — which
     // tears down the persistent backing session (tmux/herdr/zellij) — never
@@ -1385,7 +1401,7 @@ function reclaimParkedCrashDiagnostic(ds: DaemonSession): void {
 export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boolean {
   if (!ds.worker || ds.worker.killed) {
     // There is no live generation that can still own this capability.
-    ds.managedTurnOrigin = undefined;
+    retireManagedTurnOrigin(ds, true);
     return false;
   }
   if (!isSuspendableBackendType(ds.initConfig?.backendType)) return false;
@@ -1403,7 +1419,7 @@ export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boo
   ds.workerPort = null;
   ds.workerToken = null;
   ds.workerViewToken = null;
-  ds.managedTurnOrigin = undefined;
+  retireManagedTurnOrigin(ds, true);
   // Screen state describes the process we just stopped. Keeping it would make
   // the dashboard hydrate this process-less logical session as idle/working.
   ds.lastScreenStatus = undefined;
@@ -1998,7 +2014,7 @@ export function forkWorker(
     ds.workerPort = null;
     ds.workerToken = null;
     ds.workerViewToken = null;
-    ds.managedTurnOrigin = undefined;
+    retireManagedTurnOrigin(ds, true);
   }
 
   // Re-establishing a worker ends the cold-resume-suspended state: clear the
@@ -2251,7 +2267,7 @@ function setupWorkerHandlers(
   // replacement must advertise a fresh capability before daemon-mediated
   // exits may use it; carrying the old value across a restore/refork would
   // let stale per-turn authority escape its generation.
-  ds.managedTurnOrigin = undefined;
+  retireManagedTurnOrigin(ds);
   // Source authorization belongs to one worker lifetime. A replacement worker
   // must announce its own Hermes sources before any stamped final_output is
   // trusted; `/clear` rebinds within the same lifetime accumulate afterwards.
@@ -2962,7 +2978,7 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Ignored claude_exit from stale worker generation`);
           break;
         }
-        ds.managedTurnOrigin = undefined;
+        retireManagedTurnOrigin(ds, true);
         logger.info(`[${t}] ${getCliDisplayName(effectiveCliId)} exited (code: ${msg.code}, signal: ${msg.signal})`);
         ds.hasHistory = true;
         try {
@@ -3220,7 +3236,7 @@ function setupWorkerHandlers(
         // from clearing a capability already rotated for turn N+1.
         if (ds.managedTurnOrigin?.turnId === msg.turnId
           && ds.managedTurnOrigin.dispatchAttempt === msg.dispatchAttempt) {
-          ds.managedTurnOrigin = undefined;
+          retireManagedTurnOrigin(ds);
         }
         try {
           await cb.onTurnTerminal?.(ds, msg, { workerGeneration });
@@ -3274,6 +3290,7 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Dropped managed_turn_origin with mismatched sessionId`);
           break;
         }
+        retireManagedTurnOrigin(ds);
         ds.managedTurnOrigin = {
           capability: msg.capability,
           ...(msg.turnId ? { turnId: msg.turnId } : {}),
@@ -3307,7 +3324,7 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Ignored unbound stale managed turn origin revoke`);
           break;
         }
-        ds.managedTurnOrigin = undefined;
+        retireManagedTurnOrigin(ds);
         break;
       }
 
@@ -3392,7 +3409,7 @@ function setupWorkerHandlers(
     if (ds.worker === worker) {
       ds.worker = null;
       ds.workerPort = null;
-      ds.managedTurnOrigin = undefined;
+      retireManagedTurnOrigin(ds, true);
     }
     try {
       const notified = cb.onWorkerExit?.(ds, {
@@ -3844,7 +3861,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     ds.workerPort = null;
     ds.workerToken = null;
     ds.workerViewToken = null;
-    ds.managedTurnOrigin = undefined;
+    retireManagedTurnOrigin(ds, true);
   }
 
   // No ensureCliSkills — adopt mode attaches to an existing CLI session

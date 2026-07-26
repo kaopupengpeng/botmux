@@ -407,7 +407,7 @@ function computeGraceSeconds(parsed: ParsedSchedule): number {
 // ─── Tick loop ──────────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {
-  const tasks = scheduleStore.listTasks();
+  const tasks = scheduleStore.listAllTasksForScheduler();
   const now = Date.now();
 
   // Re-align to a changed effective timezone before the fire loop.
@@ -431,7 +431,7 @@ async function tick(): Promise<void> {
       const recovered = computeNextRun(task.parsed, task.lastRunAt);
       if (!recovered) continue;
       nextRunAt = recovered;
-      scheduleStore.updateTask(task.id, { nextRunAt });
+      updateTaskRuntime(task, { nextRunAt });
     }
 
     const nextMs = new Date(nextRunAt).getTime();
@@ -444,7 +444,7 @@ async function tick(): Promise<void> {
         const newNext = computeNextRun(task.parsed, new Date(now).toISOString());
         if (newNext) {
           logger.info(`[scheduler] Task "${task.name}" missed window (${Math.round((now-nextMs)/1000)}s late, grace=${grace}s), fast-forward to ${newNext}`);
-          scheduleStore.updateTask(task.id, { nextRunAt: newNext });
+          updateTaskRuntime(task, { nextRunAt: newNext });
           continue;
         }
       }
@@ -453,18 +453,18 @@ async function tick(): Promise<void> {
     // At-most-once: advance next_run BEFORE execution so crash mid-run doesn't re-fire
     if (task.parsed.kind !== 'once') {
       const newNext = computeNextRun(task.parsed, new Date(now).toISOString());
-      if (newNext) scheduleStore.updateTask(task.id, { nextRunAt: newNext });
+      if (newNext) updateTaskRuntime(task, { nextRunAt: newNext });
     }
 
     // Execute
     logger.info(`[scheduler] Task "${task.name}" (${task.id}) triggered (kind=${task.parsed.kind})`);
-    scheduleStore.updateTask(task.id, { lastRunAt: new Date().toISOString() });
+    updateTaskRuntime(task, { lastRunAt: new Date().toISOString() });
 
     if (executeCallback) {
       const taskId = task.id;
       executeCallback(task)
         .then(() => {
-          scheduleStore.markRun(taskId, true);
+          markTaskRun(task, true);
           dashboardEventBus.publish({
             type: 'schedule.fired',
             body: { id: taskId, runAt: Date.now(), status: 'ok' },
@@ -473,7 +473,7 @@ async function tick(): Promise<void> {
         })
         .catch(err => {
           logger.error(`[scheduler] Task "${task.name}" failed: ${err.message}`);
-          scheduleStore.markRun(taskId, false, err.message);
+          markTaskRun(task, false, err.message);
           dashboardEventBus.publish({
             type: 'schedule.fired',
             body: {
@@ -487,6 +487,24 @@ async function tick(): Promise<void> {
         });
     }
   }
+}
+
+function updateTaskRuntime(
+  task: ScheduledTask,
+  updates: Parameters<typeof scheduleStore.updateManagedTaskRuntime>[1],
+): void {
+  if (task.managed) scheduleStore.updateManagedTaskRuntime(task.id, updates);
+  else scheduleStore.updateTask(task.id, updates);
+}
+
+function markTaskRun(
+  task: ScheduledTask,
+  success: boolean,
+  error?: string,
+  deliveryError?: string,
+): void {
+  if (task.managed) scheduleStore.markManagedRun(task.id, success, error, deliveryError);
+  else scheduleStore.markRun(task.id, success, error, deliveryError);
 }
 
 /**
@@ -516,7 +534,9 @@ export function planCronRealign(
  *  scheduleStore.updateTask inside the daemon does not reach them on its own). */
 function applyCronRealign(updates: Array<{ id: string; nextRunAt: string }>): void {
   for (const u of updates) {
-    scheduleStore.updateTask(u.id, { nextRunAt: u.nextRunAt });
+    const task = scheduleStore.getManagedTask(u.id) ?? scheduleStore.getTask(u.id);
+    if (!task) continue;
+    updateTaskRuntime(task, { nextRunAt: u.nextRunAt });
     dashboardEventBus.publish({ type: 'schedule.updated', body: { id: u.id, patch: { nextRunAt: u.nextRunAt } } });
   }
 }
@@ -524,7 +544,7 @@ function applyCronRealign(updates: Array<{ id: string; nextRunAt: string }>): vo
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 export function startScheduler(): void {
-  const tasks = scheduleStore.listTasks();
+  const tasks = scheduleStore.listAllTasksForScheduler();
   const enabled = tasks.filter(t => t.enabled);
   logger.info(`[scheduler] Starting with ${enabled.length}/${tasks.length} enabled tasks (tick every ${TICK_INTERVAL_MS/1000}s)`);
 
@@ -532,7 +552,7 @@ export function startScheduler(): void {
   for (const task of enabled) {
     if (!task.nextRunAt) {
       const next = computeNextRun(task.parsed, task.lastRunAt);
-      if (next) scheduleStore.updateTask(task.id, { nextRunAt: next });
+      if (next) updateTaskRuntime(task, { nextRunAt: next });
     }
   }
 
