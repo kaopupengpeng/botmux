@@ -22,6 +22,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Session, ScheduledTask } from '../src/types.js';
 import type { DaemonSession } from '../src/core/types.js';
+import { taskMetadataDigest } from '../src/services/urgent-tier-provider-contract.js';
 
 // ── in-memory session store ──────────────────────────────────────────────
 const store = new Map<string, Session>();
@@ -125,6 +126,45 @@ function baseTask(overrides: Partial<ScheduledTask>): ScheduledTask {
   };
 }
 
+function managedTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+  const rootMessageId = Object.prototype.hasOwnProperty.call(overrides, 'rootMessageId')
+    ? overrides.rootMessageId ?? ''
+    : ROOT;
+  const metadata = {
+    schema: 'botmux.urgent-tier.task-metadata/v1' as const,
+    manager_domain: 'ndbflow.urgent-tier.schedule/v1' as const,
+    provider_contract: 'botmux.urgent-tier-provider/v1' as const,
+    provider_interface_revision: 1 as const,
+    callback_contract: 'ndbflow.urgent-tier.callback/v2' as const,
+    callback_contract_revision: 2 as const,
+    provider_task_id: `utp_${'1'.repeat(40)}`,
+    creator_session_id: '11111111-1111-4111-8111-111111111111',
+    creator_app_id: APP,
+    chat_id: CHAT,
+    root_message_id: rootMessageId,
+    project_id: 'project-1',
+    run_id: '22222222-2222-4222-8222-222222222222',
+    family_id: 'a'.repeat(64),
+    generation: 0,
+    tier: 'app' as const,
+    deadline_utc_ms: 1_785_000_000_000,
+    action_id: 'b'.repeat(64),
+    spec_digest: 'c'.repeat(64),
+  };
+  return baseTask({
+    id: metadata.provider_task_id,
+    rootMessageId: rootMessageId || undefined,
+    scope: rootMessageId ? 'thread' : 'chat',
+    managed: {
+      schema: 'botmux.schedule-managed/v1',
+      manager_domain: 'ndbflow.urgent-tier.schedule/v1',
+      metadata,
+      metadata_digest: taskMetadataDigest(metadata),
+    },
+    ...overrides,
+  });
+}
+
 function forkedCliInput(): string {
   const arg = forkWorkerMock.mock.calls[0][1];
   return typeof arg === 'string' ? arg : arg.content;
@@ -147,6 +187,44 @@ beforeEach(() => {
 });
 
 describe('executeScheduledTask — silent thread fire', () => {
+  it('materializes a daemon-owned callback envelope for a normal managed task', async () => {
+    const active = new Map<string, DaemonSession>();
+    await executeScheduledTask(managedTask(), active, refreshCliVersion);
+
+    const ds = active.get(sessionKey(ROOT, APP))!;
+    expect(ds.session.managedScheduleRun).toMatchObject({
+      taskId: `utp_${'1'.repeat(40)}`,
+      turnId: forkedTurnId(),
+      creatorSessionId: '11111111-1111-4111-8111-111111111111',
+      appId: APP,
+      chatId: CHAT,
+      rootMessageId: ROOT,
+      familyId: 'a'.repeat(64),
+      specDigest: 'c'.repeat(64),
+      metadataDigest: taskMetadataDigest(managedTask().managed!.metadata),
+    });
+  });
+
+  it('materializes the same callback envelope for a top-level managed task', async () => {
+    const active = new Map<string, DaemonSession>();
+    const task = managedTask({
+      rootMessageId: undefined,
+      scope: 'chat',
+      executionPosition: 'top-level',
+    });
+    await executeScheduledTask(task, active, refreshCliVersion);
+
+    const ds = [...active.values()][0];
+    expect(ds.session.managedScheduleRun).toMatchObject({
+      taskId: task.id,
+      turnId: forkedTurnId(),
+      appId: APP,
+      chatId: CHAT,
+      rootMessageId: '',
+      metadataDigest: task.managed?.metadata_digest,
+    });
+  });
+
   it('posts nothing, anchors at rootMessageId, arms the exact forked turn, wraps the prompt', async () => {
     const active = new Map<string, DaemonSession>();
     await executeScheduledTask(baseTask({ rootMessageId: ROOT, scope: 'thread', silent: true }), active, refreshCliVersion);

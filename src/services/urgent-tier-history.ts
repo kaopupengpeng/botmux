@@ -13,13 +13,13 @@ export interface HistoryMessage extends HistoryCursor {
   thread_id?: string;
 }
 
-interface ProofScope {
+export interface ProofScope {
   appId: string;
   chatId: string;
   rootMessageId: string;
   anchor: HistoryCursor;
-  sessionId?: string;
-  capabilityDigest?: string;
+  sessionId: string;
+  capabilityDigest: string;
 }
 
 interface ProofRecord extends ProofScope {
@@ -92,9 +92,8 @@ function sameScope(record: ProofRecord, expected: ProofScope): boolean {
   return record.appId === expected.appId
     && record.chatId === expected.chatId
     && record.rootMessageId === expected.rootMessageId
-    && (expected.sessionId === undefined || record.sessionId === expected.sessionId)
-    && (expected.capabilityDigest === undefined
-      || record.capabilityDigest === expected.capabilityDigest)
+    && record.sessionId === expected.sessionId
+    && record.capabilityDigest === expected.capabilityDigest
     && cursorCompare(record.anchor, expected.anchor) === 0;
 }
 

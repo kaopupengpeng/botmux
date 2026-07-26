@@ -132,6 +132,21 @@ export interface Session {
     topicTitle?: string;
     createdAt: string;
   };
+  /** Daemon-owned identity for the currently executing urgent-tier managed
+   * schedule turn. This is separate from deferredScheduleRun because ordinary
+   * topic/top-level managed tasks must not inherit hidden-topic settlement. */
+  managedScheduleRun?: {
+    taskId: string;
+    turnId: string;
+    creatorSessionId: string;
+    appId: string;
+    chatId: string;
+    rootMessageId: string;
+    familyId: string;
+    specDigest: string;
+    metadataDigest: string;
+    createdAt: string;
+  };
   /** Dedicated VC meeting consumer session identity. These sessions share the
    *  listener chat as their output route, but MUST NOT share the ordinary
    *  chat-scope routing slot (or another meeting/member's CLI context). */

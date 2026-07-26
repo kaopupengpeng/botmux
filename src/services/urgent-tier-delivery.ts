@@ -1,6 +1,7 @@
 import {
   UrgentHistoryProofStore,
   type HistoryCursor,
+  type ProofScope,
 } from './urgent-tier-history.js';
 
 interface FinalRecheck {
@@ -28,17 +29,14 @@ function sameCursor(left: HistoryCursor, right: HistoryCursor): boolean {
 }
 
 async function authorizeWrite(
-  input: {
-    appId: string;
-    chatId: string;
-    rootMessageId: string;
-    anchor: HistoryCursor;
+  input: ProofScope & {
     proofId: string;
     proofDigest: string;
   },
   deps: {
     store: UrgentHistoryProofStore;
     finalRecheck: () => Promise<FinalRecheck>;
+    revalidateBinding: (proof: ProofScope) => boolean;
   },
 ) {
   const proof = deps.store.consume(input.proofId, input.proofDigest, input);
@@ -52,6 +50,7 @@ async function authorizeWrite(
   if (final.messagesDigest !== proof.messagesDigest) {
     throw new Error('HISTORY_VISIBILITY_UNKNOWN');
   }
+  if (!deps.revalidateBinding(proof)) throw new Error('HISTORY_PROOF_UNPROVEN');
   return { proof, final };
 }
 
@@ -61,6 +60,8 @@ export async function sendConditionalAnchor(
     chatId: string;
     rootMessageId: string;
     anchor: HistoryCursor;
+    sessionId: string;
+    capabilityDigest: string;
     proofId: string;
     proofDigest: string;
     actionId: string;
@@ -70,6 +71,7 @@ export async function sendConditionalAnchor(
   deps: {
     store: UrgentHistoryProofStore;
     finalRecheck: () => Promise<FinalRecheck>;
+    revalidateBinding: (proof: ProofScope) => boolean;
     sendAnchor: (input: {
       actionId: string;
       markdown: string;
@@ -102,6 +104,8 @@ export async function sendConditionalUrgent(
     chatId: string;
     rootMessageId: string;
     anchor: HistoryCursor;
+    sessionId: string;
+    capabilityDigest: string;
     proofId: string;
     proofDigest: string;
     actionId: string;
@@ -112,6 +116,7 @@ export async function sendConditionalUrgent(
   deps: {
     store: UrgentHistoryProofStore;
     finalRecheck: () => Promise<FinalRecheck>;
+    revalidateBinding: (proof: ProofScope) => boolean;
     sendUrgent: (
       tier: 'app' | 'sms' | 'phone',
       messageId: string,

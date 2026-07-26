@@ -24,6 +24,35 @@ function proof(store: UrgentHistoryProofStore) {
 }
 
 describe('urgent conditional delivery', () => {
+  it('denies a proof from another session or capability generation', async () => {
+    const store = new UrgentHistoryProofStore({ now: () => 1_000 });
+    const issued = proof(store);
+    const send = vi.fn();
+    await expect(sendConditionalAnchor({
+      ...scope,
+      sessionId: 'session-2',
+      capabilityDigest: 'b'.repeat(64),
+      proofId: issued.proofId,
+      proofDigest: issued.proofDigest,
+      actionId: 'b'.repeat(64),
+      markdown: 'decision',
+      targetOpenId: 'ou_target',
+    }, {
+      store,
+      finalRecheck: async () => ({
+        complete: true,
+        anchorFound: true,
+        humanReplyObserved: false,
+        observedHead: scope.anchor,
+        messagesDigest: 'a'.repeat(64),
+      }),
+      revalidateBinding: () => true,
+      sendAnchor: send,
+      now: Date.now,
+    })).rejects.toThrow('HISTORY_PROOF_UNPROVEN');
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('sends an anchor only after an unchanged final recheck', async () => {
     const store = new UrgentHistoryProofStore({ now: () => 1_000 });
     const issued = proof(store);
@@ -42,6 +71,7 @@ describe('urgent conditional delivery', () => {
         observedHead: scope.anchor,
         messagesDigest: 'a'.repeat(64),
       }),
+      revalidateBinding: () => true,
       sendAnchor: send,
       now: (() => { let value = 1_100; return () => value++; })(),
     });
@@ -66,6 +96,7 @@ describe('urgent conditional delivery', () => {
         observedHead: scope.anchor,
         messagesDigest: 'a'.repeat(64),
       }),
+      revalidateBinding: () => true,
       sendUrgent: urgent,
       now: Date.now,
     });
@@ -88,6 +119,7 @@ describe('urgent conditional delivery', () => {
         observedHead: { create_time_ms: 101, message_id: 'om_advanced' },
         messagesDigest: 'b'.repeat(64),
       }),
+      revalidateBinding: () => true,
       sendAnchor: send,
       now: Date.now,
     })).rejects.toThrow('HISTORY_HEAD_ADVANCED');
@@ -126,6 +158,7 @@ describe('urgent conditional delivery', () => {
     }, {
       store,
       finalRecheck: async () => recheck,
+      revalidateBinding: () => true,
       sendAnchor: send,
       now: Date.now,
     })).rejects.toThrow();

@@ -1955,6 +1955,22 @@ export async function executeScheduledTask(
     markSessionActivity(existing);
     try {
       ensureSessionWhiteboard(existing);
+      if (task.managed) {
+        const metadata = task.managed.metadata;
+        existing.session.managedScheduleRun = {
+          taskId: task.id,
+          turnId: scheduledTurnId,
+          creatorSessionId: metadata.creator_session_id,
+          appId: metadata.creator_app_id,
+          chatId: metadata.chat_id,
+          rootMessageId: metadata.root_message_id,
+          familyId: metadata.family_id,
+          specDigest: metadata.spec_digest,
+          metadataDigest: task.managed.metadata_digest,
+          createdAt: new Date().toISOString(),
+        };
+        sessionStore.updateSession(existing.session);
+      }
       if (sharedTopicRootId) {
         beginReplyTargetTurn(existing, sharedTopicRootId, scheduledTurnId);
         sessionStore.updateSession(existing.session);
@@ -1995,6 +2011,21 @@ export async function executeScheduledTask(
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.scope = runtimeScope;
+  if (task.managed) {
+    const metadata = task.managed.metadata;
+    session.managedScheduleRun = {
+      taskId: task.id,
+      turnId: scheduledTurnId,
+      creatorSessionId: metadata.creator_session_id,
+      appId: metadata.creator_app_id,
+      chatId: metadata.chat_id,
+      rootMessageId: metadata.root_message_id,
+      familyId: metadata.family_id,
+      specDigest: metadata.spec_digest,
+      metadataDigest: task.managed.metadata_digest,
+      createdAt: new Date(now).toISOString(),
+    };
+  }
   if (deferredFreshTopic) {
     session.deferredScheduleRun = {
       taskId: task.id,

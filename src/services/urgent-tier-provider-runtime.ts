@@ -29,12 +29,16 @@ import {
   scanUrgentHistory,
   UrgentHistoryProofStore,
   type HistoryMessage,
+  type ProofScope,
 } from './urgent-tier-history.js';
 import {
   sendConditionalAnchor,
   sendConditionalUrgent,
 } from './urgent-tier-delivery.js';
-import type { UrgentTaskMetadata } from './urgent-tier-provider-contract.js';
+import {
+  taskMetadataDigest,
+  type UrgentTaskMetadata,
+} from './urgent-tier-provider-contract.js';
 import type { UrgentProviderRouterDeps } from './urgent-tier-provider-router.js';
 import { verifyUrgentNodeAuthority } from './urgent-tier-node-authority.js';
 import { registerUrgentAuthorizationLifecycle } from './urgent-tier-lifecycle.js';
@@ -83,6 +87,7 @@ function liveSession(sessionId: string) {
       ? createHash('sha256').update(ds.managedTurnOrigin.capability).digest('hex')
       : '',
     originCapability: ds.managedTurnOrigin?.capability ?? '',
+    managedTurnId: ds.managedTurnOrigin?.turnId ?? '',
   };
 }
 
@@ -173,6 +178,33 @@ async function completeHistoryPage(payload: Record<string, any>) {
     ? await listThreadMessages(payload.appId, payload.chatId, payload.rootMessageId, 0)
     : await listChatMessages(payload.appId, payload.chatId, 0);
   return { items: historyMessages(items), complete: true };
+}
+
+function currentHistoryBinding(proof: ProofScope): boolean {
+  const current = liveSession(proof.sessionId);
+  return !!current
+    && current.active
+    && current.capabilityDigest === proof.capabilityDigest
+    && current.appId === proof.appId
+    && current.chatId === proof.chatId
+    && current.rootMessageId === proof.rootMessageId;
+}
+
+function managedTaskMatchesAuthority(
+  task: ReturnType<typeof scheduleStore.getManagedTask>,
+  authority: UrgentAuthorizationRecord,
+): task is NonNullable<typeof task> & {
+  managed: NonNullable<NonNullable<typeof task>['managed']>;
+} {
+  const metadata = task?.managed?.metadata;
+  return !!metadata
+    && metadata.provider_task_id === task.id
+    && metadata.creator_session_id === authority.sessionId
+    && metadata.creator_app_id === authority.appId
+    && metadata.chat_id === authority.chatId
+    && metadata.root_message_id === authority.rootMessageId
+    && metadata.project_id === authority.projectId
+    && task.managed?.metadata_digest === taskMetadataDigest(metadata);
 }
 
 export function urgentProviderRuntimeDeps(
@@ -269,16 +301,30 @@ export function urgentProviderRuntimeDeps(
     callbackAuthenticate: raw => {
       const p = inputRecord(raw);
       const live = liveSession(p.sessionId);
-      const deferred = findActiveBySessionId(p.sessionId)?.session.deferredScheduleRun;
-      if (!live || !deferred) throw new Error('CALLBACK_ORIGIN_UNPROVEN');
-      const taskMetadata = scheduleStore.getManagedTask(deferred.taskId)?.managed?.metadata;
-      if (!taskMetadata) throw new Error('CALLBACK_ORIGIN_UNPROVEN');
+      const run = findActiveBySessionId(p.sessionId)?.session.managedScheduleRun;
+      if (!live || !run) throw new Error('CALLBACK_ORIGIN_UNPROVEN');
+      const task = scheduleStore.getManagedTask(run.taskId);
+      const taskMetadata = task?.managed?.metadata;
+      if (!taskMetadata
+        || live.managedTurnId !== run.turnId
+        || task.managed?.metadata_digest !== run.metadataDigest
+        || taskMetadata.creator_session_id !== run.creatorSessionId
+        || taskMetadata.creator_app_id !== run.appId
+        || taskMetadata.chat_id !== run.chatId
+        || taskMetadata.root_message_id !== run.rootMessageId
+        || taskMetadata.family_id !== run.familyId
+        || taskMetadata.spec_digest !== run.specDigest
+        || live.appId !== run.appId
+        || live.chatId !== run.chatId
+        || live.rootMessageId !== run.rootMessageId) {
+        throw new Error('CALLBACK_ORIGIN_UNPROVEN');
+      }
       return authenticateUrgentCallback({
         sessionId: live.sessionId,
-        executionId: deferred.turnId,
-        providerTaskId: deferred.taskId,
-        familyId: taskMetadata.family_id,
-        specDigest: taskMetadata.spec_digest,
+        executionId: run.turnId,
+        providerTaskId: run.taskId,
+        familyId: run.familyId,
+        specDigest: run.specDigest,
       }, {
         verifyManagedOrigin: sessionId => {
           const session = liveSession(sessionId);
@@ -323,6 +369,8 @@ export function urgentProviderRuntimeDeps(
         chatId: authority.chatId,
         rootMessageId: authority.rootMessageId,
         anchor: p.anchor,
+        sessionId: authority.sessionId,
+        capabilityDigest: authority.capabilityDigest,
         proofId: String(p.proofId),
         proofDigest: String(p.proofDigest),
         actionId: String(p.actionId),
@@ -333,6 +381,7 @@ export function urgentProviderRuntimeDeps(
         ok: true,
         ...(await sendConditionalAnchor(deliveryInput, {
           store: historyStore,
+          revalidateBinding: currentHistoryBinding,
           finalRecheck: async () => {
             const page = await completeHistoryPage(deliveryInput);
             if (!page.complete) {
@@ -379,6 +428,8 @@ export function urgentProviderRuntimeDeps(
         chatId: authority.chatId,
         rootMessageId: authority.rootMessageId,
         anchor: p.anchor,
+        sessionId: authority.sessionId,
+        capabilityDigest: authority.capabilityDigest,
         proofId: String(p.proofId),
         proofDigest: String(p.proofDigest),
         actionId: String(p.actionId),
@@ -390,6 +441,7 @@ export function urgentProviderRuntimeDeps(
         ok: true,
         ...(await sendConditionalUrgent(deliveryInput, {
           store: historyStore,
+          revalidateBinding: currentHistoryBinding,
           finalRecheck: async () => {
             const page = await completeHistoryPage(deliveryInput);
             if (!page.complete) {
@@ -418,7 +470,8 @@ export function urgentProviderRuntimeDeps(
       if (p.metadata.creator_app_id !== authority.appId
         || p.metadata.chat_id !== authority.chatId
         || p.metadata.root_message_id !== authority.rootMessageId
-        || p.metadata.project_id !== authority.projectId) {
+        || p.metadata.project_id !== authority.projectId
+        || p.metadata.creator_session_id !== authority.sessionId) {
         throw new Error('MANAGED_SCHEDULE_SCOPE_MISMATCH');
       }
       const task = scheduler.addTask({
@@ -444,19 +497,26 @@ export function urgentProviderRuntimeDeps(
     },
     scheduleObserve: async raw => {
       const p = inputRecord(raw);
-      await consumeGroupAuthorization(p, 'schedule_observe', 'group_read');
+      const authority = await consumeGroupAuthorization(p, 'schedule_observe', 'group_read');
       const task = scheduleStore.getManagedTask(p.providerTaskId);
-      if (!task?.managed) throw new Error('MANAGED_SCHEDULE_UNAVAILABLE');
+      if (!managedTaskMatchesAuthority(task, authority)) {
+        throw new Error('MANAGED_SCHEDULE_UNAVAILABLE');
+      }
       return { ok: true, task };
     },
     scheduleRemove: async raw => {
       const p = inputRecord(raw);
-      await consumeGroupAuthorization(p, 'schedule_remove', 'group_write');
+      const authority = await consumeGroupAuthorization(p, 'schedule_remove', 'group_write');
       const task = scheduleStore.getManagedTask(p.providerTaskId);
-      if (!task?.managed || task.managed.metadata_digest !== p.metadataDigest) {
-        throw new Error('MANAGED_SCHEDULE_MISMATCH');
+      if (!managedTaskMatchesAuthority(task, authority)
+        || task.id !== p.providerTaskId
+        || task.managed.metadata_digest !== p.metadataDigest) {
+        throw new Error('MANAGED_SCHEDULE_UNAVAILABLE');
       }
-      return { ok: scheduleStore.removeManagedTask(p.providerTaskId) };
+      if (!scheduleStore.removeManagedTask(p.providerTaskId)) {
+        throw new Error('MANAGED_SCHEDULE_UNAVAILABLE');
+      }
+      return { ok: true };
     },
   };
 }
