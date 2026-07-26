@@ -284,11 +284,13 @@ function migrate(raw: any): ScheduledTask | null {
 interface DiskSnapshot {
   map: Map<string, ScheduledTask>;
   migratedCount: number;
+  quarantine: Record<string, unknown>;
 }
 
 function readDiskSnapshot(fp: string, strict: boolean): DiskSnapshot {
   const map = new Map<string, ScheduledTask>();
-  if (!existsSync(fp)) return { map, migratedCount: 0 };
+  const quarantine: Record<string, unknown> = {};
+  if (!existsSync(fp)) return { map, migratedCount: 0, quarantine };
 
   try {
     const data = JSON.parse(readFileSync(fp, 'utf-8'));
@@ -297,22 +299,34 @@ function readDiskSnapshot(fp: string, strict: boolean): DiskSnapshot {
     }
     let migratedCount = 0;
     for (const [id, raw] of Object.entries(data)) {
-      const migrated = migrate(raw);
-      if (migrated) {
-        map.set(id, migrated);
-        if (!(raw as any).parsed) migratedCount++;
+      try {
+        const migrated = migrate(raw);
+        if (migrated) {
+          map.set(id, migrated);
+          if (!(raw as any).parsed) migratedCount++;
+        }
+      } catch (error) {
+        if (id.startsWith('utp_')) {
+          quarantine[id] = raw;
+          logger.error(`[schedule-store] Quarantined invalid managed task ${id}: ${error}`);
+          continue;
+        }
+        throw error;
       }
     }
-    return { map, migratedCount };
+    return { map, migratedCount, quarantine };
   } catch (err) {
     if (strict) throw err;
     logger.error(`Failed to load schedules: ${err}`);
-    return { map: new Map(), migratedCount: 0 };
+    return { map: new Map(), migratedCount: 0, quarantine: {} };
   }
 }
 
-function serializeTasks(map: ReadonlyMap<string, ScheduledTask>): string {
-  const obj: Record<string, ScheduledTask> = {};
+function serializeTasks(
+  map: ReadonlyMap<string, ScheduledTask>,
+  quarantine: Readonly<Record<string, unknown>> = {},
+): string {
+  const obj: Record<string, unknown> = { ...quarantine };
   for (const [id, task] of map) obj[id] = task;
   return JSON.stringify(obj, null, 2);
 }
@@ -335,7 +349,11 @@ export function __setScheduleStoreBeforeRenameTestHook(hook?: () => void): void 
  * rename, and the parent fsync makes the rename durable before callers see the
  * new in-memory snapshot.
  */
-function persistDiskSnapshot(fp: string, map: ReadonlyMap<string, ScheduledTask>): void {
+function persistDiskSnapshot(
+  fp: string,
+  map: ReadonlyMap<string, ScheduledTask>,
+  quarantine: Readonly<Record<string, unknown>> = {},
+): void {
   const parent = dirname(fp);
   ensureDir(parent);
   const tmpFp = join(
@@ -350,7 +368,7 @@ function persistDiskSnapshot(fp: string, map: ReadonlyMap<string, ScheduledTask>
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
       0o600,
     );
-    writeFileSync(fd, serializeTasks(map), 'utf-8');
+    writeFileSync(fd, serializeTasks(map, quarantine), 'utf-8');
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
@@ -391,9 +409,10 @@ function mutateTasks<T>(
   const fp = getFilePath();
   ensureDir(dirname(fp));
   return withFileLockSync(fp, () => {
-    const working = readDiskSnapshot(fp, true).map;
+    const snapshot = readDiskSnapshot(fp, true);
+    const working = snapshot.map;
     const outcome = mutate(working);
-    if (outcome.changed) persistDiskSnapshot(fp, working);
+    if (outcome.changed) persistDiskSnapshot(fp, working, snapshot.quarantine);
     // Install only after the commit succeeds. No-op/idempotent mutations still
     // refresh a stale process from the authoritative disk snapshot.
     installSnapshot(working, fp);
@@ -419,7 +438,9 @@ function load(): void {
     try {
       nextMap = withFileLockSync(fp, () => {
         const current = readDiskSnapshot(fp, true);
-        if (current.migratedCount > 0) persistDiskSnapshot(fp, current.map);
+        if (current.migratedCount > 0 && Object.keys(current.quarantine).length === 0) {
+          persistDiskSnapshot(fp, current.map);
+        }
         return current.map;
       });
     } catch (err) {

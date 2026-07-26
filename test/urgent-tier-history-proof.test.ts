@@ -51,4 +51,17 @@ describe('urgent history proof', () => {
       appId: 'cli-1', chatId: 'oc-1', rootMessageId: '', anchor,
     })).toThrow(/HISTORY_PROOF_UNPROVEN/);
   });
+
+  it('treats unknown sender types as visibility uncertainty', async () => {
+    const store = new UrgentHistoryProofStore({ now: () => 1_000 });
+    await expect(scanUrgentHistory({
+      appId: 'cli-1', chatId: 'oc-1', rootMessageId: '', anchor,
+    }, {
+      listPage: async () => ({
+        items: [{ ...anchor, sender_type: 'unknown' as never }],
+        complete: true,
+      }),
+      store,
+    })).rejects.toThrow('HISTORY_VISIBILITY_UNKNOWN');
+  });
 });

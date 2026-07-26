@@ -88,34 +88,55 @@ function sessionDeps(originCapability?: string, trustedHost = false) {
   };
 }
 
-function authorizationRecord(payload: Record<string, any>): UrgentAuthorizationRecord {
-  return {
-    proofType: payload.proofType,
-    proof: payload.proof,
-    proofDigest: payload.proofDigest,
-    daemonBootId: bootId,
-    sessionId: payload.sessionId ?? '',
-    capabilityDigest: payload.capabilityDigest ?? '',
-    operation: payload.operation,
-    capability: payload.capability,
-    projectId: payload.projectId ?? '',
-    targetOpenId: payload.targetOpenId ?? '',
-    appId: payload.appId ?? '',
-    chatId: payload.chatId ?? '',
-    rootMessageId: payload.rootMessageId ?? '',
-    issuedAtMs: payload.issuedAtMs,
-    expiresAtMs: payload.expiresAtMs,
-    maxUses: 1,
-    useCount: 0,
-  };
-}
-
 function historyMessages(raw: any[]): HistoryMessage[] {
   return raw.map(item => ({
     create_time_ms: Number(item.create_time),
     message_id: String(item.message_id),
     sender_type: item.sender?.sender_type === 'user' ? 'user' : 'bot',
   }));
+}
+
+async function consumeGroupAuthorization(
+  payload: Record<string, any>,
+  operation: string,
+  capability: 'group_read' | 'group_write',
+  targetOpenId = '',
+): Promise<UrgentAuthorizationRecord> {
+  const authorization = inputRecord(payload.authorization);
+  const session = liveSession(authorization.sessionId);
+  if (!session
+    || !session.active
+    || session.role !== 'pm-project'
+    || session.appId !== authorization.appId
+    || session.chatId !== authorization.chatId
+    || session.rootMessageId !== (authorization.rootMessageId ?? '')
+    || !(await urgentProviderBotInChat(session.appId, session.chatId))
+    || (targetOpenId
+      && !(await listChatMemberOpenIds(session.appId, session.chatId)).includes(targetOpenId))) {
+    throw new Error('SESSION_AUTHORIZATION_UNPROVEN');
+  }
+  return authorizationStore.consumeIssued(authorization.proofId, {
+    proofType: 'group',
+    proof: authorization.proof,
+    proofDigest: authorization.proofDigest,
+    operation,
+    capability,
+    projectId: authorization.projectId,
+    targetOpenId,
+    appId: authorization.appId,
+    chatId: authorization.chatId,
+    rootMessageId: authorization.rootMessageId ?? '',
+    sessionId: authorization.sessionId,
+  }, record => {
+    const current = liveSession(record.sessionId);
+    return !!current
+      && current.active
+      && current.role === 'pm-project'
+      && current.capabilityDigest === record.capabilityDigest
+      && current.appId === record.appId
+      && current.chatId === record.chatId
+      && current.rootMessageId === record.rootMessageId;
+  });
 }
 
 async function completeHistoryPage(payload: Record<string, any>) {
@@ -149,9 +170,41 @@ export function urgentProviderRuntimeDeps(
       );
       return { ok: true, contract: 'botmux.urgent-tier-provider/v1', ...result };
     },
-    authorizationConsume: raw => {
+    authorizationConsume: async raw => {
       const p = inputRecord(raw);
-      return { ok: true, proof: authorizationStore.consume(p.proofId, authorizationRecord(p)) };
+      if (p.proofType === 'group') {
+        const authority = await consumeGroupAuthorization(
+          { authorization: p },
+          p.operation,
+          p.capability,
+          p.targetOpenId ?? '',
+        );
+        return { ok: true, proof: authority.proof, proofDigest: authority.proofDigest };
+      }
+      const authority = authorizationStore.consumeIssued(p.proofId, {
+        proofType: p.proofType,
+        proof: p.proof,
+        proofDigest: p.proofDigest,
+        operation: p.operation,
+        capability: p.capability,
+        projectId: p.projectId ?? '',
+        targetOpenId: p.targetOpenId ?? '',
+        appId: p.appId ?? '',
+        chatId: p.chatId ?? '',
+        rootMessageId: p.rootMessageId ?? '',
+        sessionId: p.sessionId ?? '',
+      }, record => {
+        if (record.proofType === 'node') return context.trustedHost === true;
+        const session = liveSession(record.sessionId);
+        return !!session
+          && session.active
+          && session.role === 'pm-project'
+          && session.capabilityDigest === record.capabilityDigest
+          && session.appId === record.appId
+          && session.chatId === record.chatId
+          && session.rootMessageId === record.rootMessageId;
+      });
+      return { ok: true, proof: authority.proof, proofDigest: authority.proofDigest };
     },
     authorizationRevoke: raw => {
       const p = inputRecord(raw);
@@ -178,25 +231,33 @@ export function urgentProviderRuntimeDeps(
     },
     historyScan: async raw => {
       const p = inputRecord(raw);
+      const authority = await consumeGroupAuthorization(p, 'history', 'group_read');
+      const scope = {
+        appId: authority.appId,
+        chatId: authority.chatId,
+        rootMessageId: authority.rootMessageId,
+        anchor: p.anchor,
+      };
       return {
         ok: true,
-        ...(await scanUrgentHistory({
-          appId: p.appId,
-          chatId: p.chatId,
-          rootMessageId: p.rootMessageId ?? '',
-          anchor: p.anchor,
-        }, {
-          listPage: () => completeHistoryPage(p),
+        ...(await scanUrgentHistory(scope, {
+          listPage: () => completeHistoryPage(scope),
           store: historyStore,
         })),
       };
     },
     sendAnchor: async raw => {
       const p = inputRecord(raw);
+      const authority = await consumeGroupAuthorization(
+        p,
+        'send_anchor',
+        'group_write',
+        String(p.targetOpenId),
+      );
       const deliveryInput = {
-        appId: String(p.appId),
-        chatId: String(p.chatId),
-        rootMessageId: String(p.rootMessageId ?? ''),
+        appId: authority.appId,
+        chatId: authority.chatId,
+        rootMessageId: authority.rootMessageId,
         anchor: p.anchor,
         proofId: String(p.proofId),
         proofDigest: String(p.proofDigest),
@@ -228,10 +289,16 @@ export function urgentProviderRuntimeDeps(
     },
     sendUrgent: async raw => {
       const p = inputRecord(raw);
+      const authority = await consumeGroupAuthorization(
+        p,
+        'send_urgent',
+        'group_write',
+        String(p.targetOpenId),
+      );
       const deliveryInput = {
-        appId: String(p.appId),
-        chatId: String(p.chatId),
-        rootMessageId: String(p.rootMessageId ?? ''),
+        appId: authority.appId,
+        chatId: authority.chatId,
+        rootMessageId: authority.rootMessageId,
         anchor: p.anchor,
         proofId: String(p.proofId),
         proofDigest: String(p.proofDigest),
@@ -257,8 +324,15 @@ export function urgentProviderRuntimeDeps(
         })),
       };
     },
-    scheduleEnsure: raw => {
+    scheduleEnsure: async raw => {
       const p = inputRecord(raw);
+      const authority = await consumeGroupAuthorization(p, 'schedule_ensure', 'group_write');
+      if (p.metadata.creator_app_id !== authority.appId
+        || p.metadata.chat_id !== authority.chatId
+        || p.metadata.root_message_id !== authority.rootMessageId
+        || p.metadata.project_id !== authority.projectId) {
+        throw new Error('MANAGED_SCHEDULE_SCOPE_MISMATCH');
+      }
       const task = scheduler.addTask({
         id: p.metadata.provider_task_id,
         name: `ndbflow-urgent-${p.metadata.family_id.slice(0, 12)}`,
@@ -280,14 +354,16 @@ export function urgentProviderRuntimeDeps(
       });
       return { ok: true, task };
     },
-    scheduleObserve: raw => {
+    scheduleObserve: async raw => {
       const p = inputRecord(raw);
+      await consumeGroupAuthorization(p, 'schedule_observe', 'group_read');
       const task = scheduleStore.getTask(p.providerTaskId);
       if (!task?.managed) throw new Error('MANAGED_SCHEDULE_UNAVAILABLE');
       return { ok: true, task };
     },
-    scheduleRemove: raw => {
+    scheduleRemove: async raw => {
       const p = inputRecord(raw);
+      await consumeGroupAuthorization(p, 'schedule_remove', 'group_write');
       const task = scheduleStore.getTask(p.providerTaskId);
       if (!task?.managed || task.managed.metadata_digest !== p.metadataDigest) {
         throw new Error('MANAGED_SCHEDULE_MISMATCH');

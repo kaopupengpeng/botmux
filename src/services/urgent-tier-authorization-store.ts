@@ -120,6 +120,52 @@ export class UrgentAuthorizationStore {
     return structuredClone(expected);
   }
 
+  consumeIssued(
+    proofId: string,
+    input: {
+      proofType: UrgentProofType;
+      proof: Record<string, unknown>;
+      proofDigest: string;
+      operation: string;
+      capability: string;
+      projectId: string;
+      targetOpenId: string;
+      appId: string;
+      chatId: string;
+      rootMessageId: string;
+      sessionId: string;
+    },
+    validateCurrentAuthority: (record: Readonly<UrgentAuthorizationRecord>) => boolean,
+  ): UrgentAuthorizationRecord {
+    this.sweep();
+    const record = this.records.get(proofId);
+    if (!record
+      || record.proofType !== input.proofType
+      || !sameString(record.proofDigest, input.proofDigest)
+      || !sameString(canonical(record.proof), canonical(input.proof))
+      || record.operation !== input.operation
+      || record.capability !== input.capability
+      || record.projectId !== input.projectId
+      || record.targetOpenId !== input.targetOpenId
+      || record.appId !== input.appId
+      || record.chatId !== input.chatId
+      || record.rootMessageId !== input.rootMessageId
+      || record.sessionId !== input.sessionId
+      || record.daemonBootId !== this.bootId
+      || record.expiresAtMs <= this.now()
+      || record.useCount !== 0
+      || !validateCurrentAuthority(record)) {
+      throw new UrgentAuthorizationError(
+        input.proofType === 'node'
+          ? 'NODE_READ_AUTHORIZATION_UNPROVEN'
+          : 'SESSION_AUTHORIZATION_UNPROVEN',
+      );
+    }
+    this.records.delete(proofId);
+    const { proofId: _proofId, ...authority } = record;
+    return structuredClone(authority);
+  }
+
   revoke(proofId: string): { ok: true } {
     this.records.delete(proofId);
     return { ok: true };

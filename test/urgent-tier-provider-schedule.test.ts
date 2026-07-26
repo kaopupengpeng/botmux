@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeInputHash } from '../src/utils/canonical-input-hash.js';
@@ -57,5 +57,24 @@ describe('managed urgent schedule', () => {
     expect(() => createTask({ ...params, id: 'ordinary1',
       managed: { schema: 'botmux.schedule-managed/v1',
         manager_domain: 'ndbflow.urgent-tier.schedule/v1', metadata } })).toThrow(/utp_/);
+  });
+
+  it('quarantines malformed managed rows without losing ordinary tasks', async () => {
+    writeFileSync(join(dir, 'schedules.json'), JSON.stringify({
+      ordinary1: {
+        id: 'ordinary1', ...params, enabled: true, createdAt: '2026-07-26T00:00:00Z',
+      },
+      [`utp_${'9'.repeat(40)}`]: {
+        id: `utp_${'9'.repeat(40)}`, ...params, enabled: true,
+        createdAt: '2026-07-26T00:00:00Z',
+        managed: { schema: 'bad' },
+      },
+    }, null, 2));
+    const { listTasks, createTask } = await import('../src/services/schedule-store.js');
+    expect(listTasks().map(task => task.id)).toEqual(['ordinary1']);
+    createTask({ ...params, id: 'ordinary2', name: 'ordinary2' });
+    const disk = JSON.parse(readFileSync(join(dir, 'schedules.json'), 'utf8'));
+    expect(disk[`utp_${'9'.repeat(40)}`].managed).toEqual({ schema: 'bad' });
+    expect(disk.ordinary2.name).toBe('ordinary2');
   });
 });
