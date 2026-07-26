@@ -18,6 +18,8 @@
 - Do not claim atomic no-urgent-after-reply semantics.
 - Do not deploy to the live daemon until implementation review passes.
 - Do not tag or publish an npm release without separate user approval.
+- Implement only in this dedicated feature worktree/branch after design
+  review-pass.
 
 ---
 
@@ -59,7 +61,53 @@ Commit message: `feat(urgent-provider): 定义任务元数据与摘要契约`
 
 ---
 
-### Task 2: Session-authenticated Callback Claims
+### Task 2: Ordinary Session Scope and Authorization
+
+**Files:**
+- Modify: `src/im/lark/client.ts`
+- Create: `src/services/urgent-tier-session-auth.ts`
+- Test: `test/urgent-tier-session-auth.test.ts`
+
+**Interfaces:**
+- Produces: `authenticateUrgentSession(input, deps)` and
+  `authenticateUrgentNodeRead(input, deps)`.
+
+- [ ] **Step 1: Write failing ordinary-session tests**
+
+Cover PTY and tmux sessions plus one non-default CLI/backend combination.
+Cover receiver/adopt/unmanaged/stale/wrong-role sessions, route overrides,
+node-wide HMAC without session capability, bot membership, target membership,
+tenant-key absence, operation/capability mismatch, proof expiry, and generic
+failure/oracle resistance.
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```bash
+pnpm vitest run --project unit test/urgent-tier-session-auth.test.ts
+```
+
+Expected: FAIL because ordinary session auth does not exist.
+
+- [ ] **Step 3: Implement exact scope proofs**
+
+Use daemon live-session state, managed-origin capability, runtime role,
+registered-client membership probes, and `/bot/v3/info` tenant key. Return
+exact `session-proof/v1`. Implement separate host-only node-read proof; never
+allow proof substitution.
+
+- [ ] **Step 4: Run focused tests and verify GREEN**
+
+Expected: PASS without message/urgent mutation.
+
+- [ ] **Step 5: Commit**
+
+Commit message: `feat(urgent-provider): 认证普通会话与节点只读权限`
+
+---
+
+### Task 3: Session-authenticated Callback Claims
 
 **Files:**
 - Create: `src/services/urgent-tier-provider-auth.ts`
@@ -100,7 +148,7 @@ Commit message: `feat(urgent-provider): 绑定回调会话与完整任务声明`
 
 ---
 
-### Task 3: Owner-only History-proof Ledger
+### Task 4: Owner-only History-proof Ledger
 
 **Files:**
 - Create: `src/services/urgent-tier-history-proof-store.ts`
@@ -140,7 +188,7 @@ Commit message: `feat(urgent-provider): 持久化历史可见性证明`
 
 ---
 
-### Task 4: Conditional Anchor and Native Urgent Writes
+### Task 5: Conditional Anchor and Native Urgent Writes
 
 **Files:**
 - Create: `src/services/urgent-tier-delivery.ts`
@@ -181,7 +229,7 @@ Commit message: `feat(urgent-provider): 加入条件锚点与原生加急`
 
 ---
 
-### Task 5: Exact Schedule Metadata and Deferred Envelope
+### Task 6: Managed Schedule Envelope and Deferred Identity
 
 **Files:**
 - Modify: `src/services/schedule-store.ts`
@@ -190,13 +238,15 @@ Commit message: `feat(urgent-provider): 加入条件锚点与原生加急`
 - Test: `test/urgent-tier-provider-schedule.test.ts`
 
 **Interfaces:**
-- Produces: exact ensure/observe/remove operations and deferred-run claims.
+- Produces: exact managed ensure/observe/remove operations and deferred-run claims while preserving the ordinary canonical hash.
 
 - [ ] **Step 1: Write failing metadata round-trip tests**
 
-Cover exact 19-field storage, digest equality, idempotent ensure, metadata
-conflict, exact remove, creator/callback session distinction, and deferred
-envelope binding.
+Freeze pre-change ordinary canonical-hash vectors, then cover exact 19-field
+storage, `utp_` namespace, managed-domain digest, idempotent ensure, metadata
+conflict, exact remove, creator/callback session distinction, reload/migration,
+quarantine byte preservation across ordinary mutations, and deferred envelope
+binding.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
@@ -206,9 +256,12 @@ Expected: FAIL because urgent task metadata is not stored.
 
 - [ ] **Step 3: Implement exact managed schedules**
 
-Add a manager-specific metadata record without changing ordinary schedule
-semantics. Preserve full metadata into the deferred run and require exact
-observation/removal.
+Add optional `botmux.schedule-managed/v1`. Keep ordinary
+`canonicalScheduleInput()` untouched. Use the separate managed canonical domain
+and reject cross-namespace rows. Quarantine malformed managed rows as
+non-executable while preserving their raw bytes through ordinary mutations and
+legacy normalization. Preserve full valid metadata into deferred run identity
+and require exact observation/removal.
 
 - [ ] **Step 4: Run focused and existing scheduler tests**
 
@@ -219,6 +272,7 @@ pnpm vitest run --project unit \
   test/urgent-tier-provider-schedule.test.ts \
   test/scheduler.test.ts \
   test/schedule-store.test.ts \
+  test/schedule-store-idempotency.test.ts \
   test/deferred-schedule-settlement.test.ts
 ```
 
@@ -230,7 +284,7 @@ Commit message: `feat(urgent-provider): 冻结调度任务与延迟回调身份`
 
 ---
 
-### Task 6: Daemon IPC and CLI Wiring
+### Task 7: Daemon IPC and CLI Wiring
 
 **Files:**
 - Create: `src/cli/urgent-provider.ts`
@@ -239,13 +293,14 @@ Commit message: `feat(urgent-provider): 冻结调度任务与延迟回调身份`
 - Test: `test/urgent-tier-provider-ipc.test.ts`
 
 **Interfaces:**
-- Produces: all eight `botmux urgent-provider` commands and authenticated daemon routes.
+- Produces: all ten `botmux urgent-provider` commands and authenticated daemon routes.
 
 - [ ] **Step 1: Write failing route and schema tests**
 
-Cover capabilities, callback authentication, history scan, conditional writes,
-schedule operations, unknown fields, oversize bodies, malformed JSON, and
-credential redaction.
+Cover capabilities, ordinary session authentication, node-read authentication,
+callback authentication, history scan, conditional writes, schedule
+operations, unknown fields, oversize bodies, malformed JSON, and credential
+redaction.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
@@ -265,6 +320,7 @@ Run:
 ```bash
 pnpm vitest run --project unit \
   test/urgent-tier-provider-ipc.test.ts \
+  test/urgent-tier-session-auth.test.ts \
   test/daemon-ipc-session-auth.test.ts \
   test/v3-daemon-ipc-auth.test.ts
 ```
@@ -277,7 +333,7 @@ Commit message: `feat(urgent-provider): 接入受认证守护进程命令面`
 
 ---
 
-### Task 7: Full Verification and Reviewed Local Publication
+### Task 8: Full Verification, PR Review, and Reviewed Local Publication
 
 **Files:**
 - Modify: `docs/design/2026-07-26-urgent-tier-provider-interface.md`
@@ -310,7 +366,18 @@ messages/schedules remain unchanged.
 
 Freeze commit and test output. Do not deploy before review-pass.
 
-- [ ] **Step 5: Publish reviewed commit locally**
+- [ ] **Step 5: Push the feature branch and create a botmux PR**
+
+Use a Chinese PR description with change, reason, cross-platform/CLI/backend/
+session impact, and exact test evidence. Do not tag, publish npm, merge, or
+deploy.
+
+- [ ] **Step 6: Wait for PR/review acceptance of the exact commit**
+
+Record the reviewed commit and rollback checkout. Do not live-deploy a moving
+branch.
+
+- [ ] **Step 7: Publish reviewed commit locally**
 
 After explicit review-pass:
 
@@ -319,13 +386,21 @@ pnpm switch:here
 pnpm daemon:restart
 ```
 
-Verify the global shim and daemon resolve the reviewed commit.
+Verify the global shim and daemon resolve the reviewed commit. Preserve the
+rollback command:
 
-- [ ] **Step 6: Run non-mutating capability probe**
+```bash
+cd /data00/home/shijinpeng.6/code/botmux
+pnpm switch:here
+pnpm daemon:restart
+```
 
-Run `botmux urgent-provider capabilities` from the verified `pm-project`
-session. Do not send anchors or urgent actions.
+- [ ] **Step 8: Run non-mutating capability and readiness probes**
 
-- [ ] **Step 7: Commit documentation**
+Run `botmux urgent-provider capabilities`, ordinary `session-authenticate`,
+bot membership, and target membership readiness from the verified
+`pm-project` session. Do not send anchors or urgent actions.
+
+- [ ] **Step 9: Commit documentation**
 
 Commit message: `docs(urgent-provider): 记录验证与本地发布流程`
